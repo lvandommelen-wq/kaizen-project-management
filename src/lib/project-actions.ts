@@ -167,8 +167,7 @@ export type GateActionProtectionResult =
       actions: ProjectAction[];
       referenceIds: string[];
     }
-  | { outcome: "actions_required" }
-  | { outcome: "open_gate_actions" };
+  | { outcome: "accepted_actions_missing" };
 
 const dataDirectory = path.join(process.cwd(), ".data");
 const actionsFile = path.join(dataDirectory, "actions.json");
@@ -764,19 +763,6 @@ export async function getGateActions(projectId: string, gateId: string) {
   );
 }
 
-export async function getOpenGateActions(
-  projectId: string,
-  gateId: string,
-  packageId?: string,
-) {
-  const actions = await getGateActions(projectId, gateId);
-  return actions.filter(
-    (action) =>
-      isProjectActionOpen(action) &&
-      (!packageId || action.packageIds.includes(packageId)),
-  );
-}
-
 export async function createManualProjectAction(
   projectId: string,
   input: ProjectActionInput,
@@ -1043,24 +1029,21 @@ export async function reopenProjectAction(
 export async function protectGateActionsForDecision(
   projectId: string,
   gateId: string,
-  decision: ProtectedGateDecision,
+  decision: Extract<ProtectedGateDecision, "approved_with_actions">,
+  acceptedActionIds: string[],
 ): Promise<GateActionProtectionResult> {
   return withStoreMutation(async (store) => {
+    const uniqueActionIds = [...new Set(acceptedActionIds)];
+    const acceptedActionIdSet = new Set(uniqueActionIds);
     const matching = store.actions.filter(
       (action) =>
         action.projectId === projectId &&
         action.source === "gate" &&
-        action.gateId === gateId,
+        action.gateId === gateId &&
+        acceptedActionIdSet.has(action.id),
     );
-    const openActions = matching.filter(isProjectActionOpen);
-    if (decision === "approved" && openActions.length > 0) {
-      return { outcome: "open_gate_actions" };
-    }
-    if (decision === "approved_with_actions" && openActions.length === 0) {
-      return { outcome: "actions_required" };
-    }
-    if (matching.length === 0) {
-      return { outcome: "protected", actions: [], referenceIds: [] };
+    if (matching.length !== uniqueActionIds.length) {
+      return { outcome: "accepted_actions_missing" };
     }
 
     const now = new Date().toISOString();

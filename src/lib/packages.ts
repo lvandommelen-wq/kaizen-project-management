@@ -1,28 +1,32 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { ensureDefaultDeliverables, getGateDeliverables } from "./deliverables";
+import {
+  ensureDefaultDeliverables,
+  getGateDeliverables,
+  removeCriterionFromDeliverables,
+} from "./deliverables";
 import {
   createGateReviewCycle,
   createGates,
-  gatesRequireTemplateUpdate,
   getGateSubmissionIssues,
-  getGateReviewReadiness,
   isGateInPreparation,
   normalizeGates,
+  recordGateReviewResponse,
+  withdrawGateReviewCycle,
   type Gate,
   type GateApprover,
   type GateApproverInput,
   type GateCriterion,
   type GateCriterionInput,
-  type GateDecision,
-  type GateReviewResult,
+  type GateReviewResponseInput,
+  type GateReviewResponseResult,
   type GateSubmissionResult,
+  type GateWithdrawalResult,
 } from "./gates";
 import { packageGateTemplates } from "./governance-templates";
 import {
   getGateActions,
-  getOpenGateActions,
   protectGateActionsForDecision,
   rollbackGateActionProtection,
   withGateWorkflowLock,
@@ -119,14 +123,7 @@ async function readPackagesFile(): Promise<ProjectPackage[]> {
   await ensureDataFile();
   const contents = await readFile(packagesFile, "utf8");
   const storedPackages = JSON.parse(contents) as Partial<ProjectPackage>[];
-  const requiresTemplateUpdate = storedPackages.some((projectPackage) =>
-    gatesRequireTemplateUpdate(projectPackage.id ?? "", projectPackage.gates, packageGateTemplates),
-  );
   const packages = storedPackages.map(normalizePackage);
-
-  if (requiresTemplateUpdate) {
-    await writePackagesFile(packages);
-  }
 
   return packages.sort((a, b) => a.packageCode.localeCompare(b.packageCode));
 }
@@ -160,48 +157,53 @@ export async function getPackage(projectId: string, packageId: string) {
 }
 
 export async function createPackage(projectId: string, input: PackageFormInput) {
-  const packages = await readPackagesFile();
-  assertUniquePackageCode(packages, projectId, input.packageCode);
+  return withGateWorkflowLock(async () => {
+    const packages = await readPackagesFile();
+    assertUniquePackageCode(packages, projectId, input.packageCode);
 
-  const now = new Date().toISOString();
-  const id = randomUUID();
-  const projectPackage: ProjectPackage = {
-    id,
-    projectId,
-    ...input,
-    currentStage: "definition",
-    gates: createGates(id, packageGateTemplates),
-    createdAt: now,
-    updatedAt: now,
-  };
+    const now = new Date().toISOString();
+    const id = randomUUID();
+    const projectPackage: ProjectPackage = {
+      id,
+      projectId,
+      ...input,
+      currentStage: "definition",
+      gates: createGates(id, packageGateTemplates),
+      createdAt: now,
+      updatedAt: now,
+    };
 
-  await writePackagesFile([...packages, projectPackage]);
-  await ensurePackageDefaultDeliverables(projectPackage);
-  return projectPackage;
+    await writePackagesFile([...packages, projectPackage]);
+    await ensurePackageDefaultDeliverables(projectPackage);
+    return projectPackage;
+  });
 }
 
 export async function updatePackage(projectId: string, packageId: string, input: PackageFormInput) {
-  const packages = await readPackagesFile();
-  const index = packages.findIndex(
-    (projectPackage) => projectPackage.projectId === projectId && projectPackage.id === packageId,
-  );
+  return withGateWorkflowLock(async () => {
+    const packages = await readPackagesFile();
+    const index = packages.findIndex(
+      (projectPackage) => projectPackage.projectId === projectId && projectPackage.id === packageId,
+    );
 
-  if (index === -1) {
-    return null;
-  }
+    if (index === -1) {
+      return null;
+    }
 
-  assertUniquePackageCode(packages, projectId, input.packageCode, packageId);
+    assertUniquePackageCode(packages, projectId, input.packageCode, packageId);
 
-  const updatedPackage: ProjectPackage = {
-    ...packages[index],
-    ...input,
-    updatedAt: new Date().toISOString(),
-  };
+    const updatedPackage: ProjectPackage = {
+      ...packages[index],
+      ...input,
+      currentStage: packages[index].currentStage,
+      updatedAt: new Date().toISOString(),
+    };
 
-  packages[index] = updatedPackage;
-  await writePackagesFile(packages);
+    packages[index] = updatedPackage;
+    await writePackagesFile(packages);
 
-  return updatedPackage;
+    return updatedPackage;
+  });
 }
 
 export async function submitPackageGateForApproval(
@@ -271,137 +273,176 @@ export async function submitPackageGateForApproval(
   });
 }
 
-export async function reviewPackageGate(
+export async function withdrawPackageGateSubmission(
   projectId: string,
   packageId: string,
   gateId: string,
-  decision: GateDecision,
-): Promise<GateReviewResult<ProjectPackage> | null> {
-  return withGateWorkflowLock(() =>
-    reviewPackageGateWithoutWorkflowLock(projectId, packageId, gateId, decision),
-  );
+): Promise<GateWithdrawalResult<ProjectPackage> | null> {
+  return withGateWorkflowLock(async () => {
+    const [project, packages] = await Promise.all([getProject(projectId), readPackagesFile()]);
+    const projectPackage = packages.find(
+      (candidate) => candidate.projectId === projectId && candidate.id === packageId,
+    );
+    const gate = projectPackage?.gates.find((candidate) => candidate.id === gateId);
+
+    if (!project || !projectPackage || !gate) {
+      return null;
+    }
+
+    if (gate.stageId !== projectPackage.currentStage) {
+      return { outcome: "not_current" };
+    }
+
+    const now = new Date().toISOString();
+    const result = withdrawGateReviewCycle(gate, {
+      withdrawnAt: now,
+      withdrawnBy: {
+        userId: null,
+        displayName: project.projectManager,
+        email: null,
+      },
+    });
+
+    if (result.outcome !== "withdrawn") {
+      return result;
+    }
+
+    projectPackage.updatedAt = now;
+    await writePackagesFile(packages);
+
+    return { ...result, entity: projectPackage };
+  });
 }
 
-async function reviewPackageGateWithoutWorkflowLock(
+export async function respondToPackageGateReview(
   projectId: string,
   packageId: string,
   gateId: string,
-  decision: GateDecision,
-): Promise<GateReviewResult<ProjectPackage> | null> {
-  const packages = await readPackagesFile();
-  const index = packages.findIndex(
-    (projectPackage) => projectPackage.projectId === projectId && projectPackage.id === packageId,
-  );
+  input: GateReviewResponseInput,
+): Promise<GateReviewResponseResult<ProjectPackage> | null> {
+  return withGateWorkflowLock(async () => {
+    const packages = await readPackagesFile();
+    const projectPackage = packages.find(
+      (candidate) =>
+        candidate.projectId === projectId && candidate.id === packageId,
+    );
+    const gate = projectPackage?.gates.find(
+      (candidate) => candidate.id === gateId,
+    );
 
-  if (index === -1) {
-    return null;
-  }
-
-  const projectPackage = packages[index];
-  const gate = projectPackage.gates.find((candidate) => candidate.id === gateId);
-
-  if (!gate) {
-    return null;
-  }
-
-  if (gate.stageId !== projectPackage.currentStage) {
-    return { outcome: "not_current" };
-  }
-
-  if (!isGateInPreparation(gate)) {
-    return { outcome: "already_decided" };
-  }
-
-  await ensurePackageDefaultDeliverables(projectPackage);
-  const deliverables = await getGateDeliverables(projectId, projectPackage.id, gate.id);
-  const readiness = getGateReviewReadiness(gate, deliverables);
-  const openGateActions = await getOpenGateActions(projectId, gate.id, projectPackage.id);
-
-  if (decision === "approved" && !readiness.isReadyForApproval) {
-    return { outcome: "incomplete" };
-  }
-
-  if (decision === "approved" && openGateActions.length > 0) {
-    return { outcome: "open_gate_actions" };
-  }
-
-  if (decision === "approved_with_actions" && openGateActions.length === 0) {
-    return { outcome: "actions_required" };
-  }
-
-  const protection = await protectGateActionsForDecision(projectId, gate.id, decision);
-  if (protection.outcome !== "protected") {
-    return { outcome: protection.outcome };
-  }
-  gate.status = decision === "rejected_rework" ? "returned_for_rework" : decision;
-
-  if (decision !== "rejected_rework") {
-    const nextStage = getNextPackageStage(projectPackage.currentStage);
-
-    if (nextStage) {
-      projectPackage.currentStage = nextStage;
+    if (!projectPackage || !gate) {
+      return null;
     }
-  }
 
-  projectPackage.updatedAt = new Date().toISOString();
+    if (gate.stageId !== projectPackage.currentStage) {
+      return { outcome: "not_current" };
+    }
 
-  packages[index] = projectPackage;
-  try {
-    await writePackagesFile(packages);
-  } catch (error) {
-    await rollbackGateActionProtection(projectId, protection.referenceIds);
-    throw error;
-  }
+    const now = new Date().toISOString();
+    const transition = recordGateReviewResponse(gate, input, now);
+    if (transition.outcome !== "recorded") {
+      return transition;
+    }
 
-  return { outcome: "reviewed", entity: projectPackage };
+    let referenceIds: string[] = [];
+    if (transition.completion === "approved_with_actions") {
+      const protection = await protectGateActionsForDecision(
+        projectId,
+        gate.id,
+        transition.completion,
+        transition.acceptedActionIds,
+      );
+      if (protection.outcome !== "protected") {
+        return protection;
+      }
+      referenceIds = protection.referenceIds;
+    }
+
+    if (
+      transition.completion === "approved" ||
+      transition.completion === "approved_with_actions"
+    ) {
+      const nextStage = getNextPackageStage(projectPackage.currentStage);
+      if (nextStage) {
+        projectPackage.currentStage = nextStage;
+      }
+    }
+
+    projectPackage.updatedAt = now;
+    try {
+      await writePackagesFile(packages);
+    } catch (error) {
+      await rollbackGateActionProtection(projectId, referenceIds);
+      throw error;
+    }
+
+    return {
+      outcome: "recorded",
+      entity: projectPackage,
+      reviewCycle: transition.reviewCycle,
+      completion: transition.completion,
+    };
+  });
 }
 
 export async function reopenPackageGate(projectId: string, packageId: string, gateId: string) {
-  const packages = await readPackagesFile();
-  const projectPackage = packages.find(
-    (candidate) => candidate.projectId === projectId && candidate.id === packageId,
-  );
-  const gate = projectPackage?.gates.find((candidate) => candidate.id === gateId);
+  return withGateWorkflowLock(async () => {
+    const packages = await readPackagesFile();
+    const projectPackage = packages.find(
+      (candidate) => candidate.projectId === projectId && candidate.id === packageId,
+    );
+    const gate = projectPackage?.gates.find((candidate) => candidate.id === gateId);
 
-  if (!projectPackage || !gate) {
-    return null;
-  }
+    if (!projectPackage || !gate) {
+      return null;
+    }
 
-  if (gate.status !== "not_reviewed") {
-    gate.status = "not_reviewed";
-    projectPackage.updatedAt = new Date().toISOString();
-    await writePackagesFile(packages);
-  }
+    if (gate.status === "approved" || gate.status === "approved_with_actions") {
+      gate.status = "not_submitted";
+      projectPackage.updatedAt = new Date().toISOString();
+      await writePackagesFile(packages);
+    }
 
-  return projectPackage;
+    return projectPackage;
+  });
 }
 
 export async function returnPackageToPreviousStage(projectId: string, packageId: string) {
-  const packages = await readPackagesFile();
-  const index = packages.findIndex(
-    (projectPackage) => projectPackage.projectId === projectId && projectPackage.id === packageId,
-  );
+  return withGateWorkflowLock(async () => {
+    const packages = await readPackagesFile();
+    const index = packages.findIndex(
+      (projectPackage) => projectPackage.projectId === projectId && projectPackage.id === packageId,
+    );
 
-  if (index === -1) {
-    return null;
-  }
+    if (index === -1) {
+      return null;
+    }
 
-  const previousStage = getPreviousPackageStage(packages[index].currentStage);
+    if (
+      packages[index].gates.some(
+        (gate) => gate.status === "submitted_for_approval",
+      )
+    ) {
+      return packages[index];
+    }
 
-  if (!previousStage) {
-    return packages[index];
-  }
+    const previousStage = getPreviousPackageStage(packages[index].currentStage);
 
-  const updatedPackage: ProjectPackage = {
-    ...packages[index],
-    currentStage: previousStage,
-    updatedAt: new Date().toISOString(),
-  };
+    if (!previousStage) {
+      return packages[index];
+    }
 
-  packages[index] = updatedPackage;
-  await writePackagesFile(packages);
+    const updatedPackage: ProjectPackage = {
+      ...packages[index],
+      currentStage: previousStage,
+      updatedAt: new Date().toISOString(),
+    };
 
-  return updatedPackage;
+    packages[index] = updatedPackage;
+    await writePackagesFile(packages);
+
+    return updatedPackage;
+  });
 }
 
 export async function createPackageGateApprover(
@@ -410,25 +451,27 @@ export async function createPackageGateApprover(
   gateId: string,
   input: GateApproverInput,
 ) {
-  const packages = await readPackagesFile();
-  const projectPackage = packages.find(
-    (candidate) => candidate.projectId === projectId && candidate.id === packageId,
-  );
-  const gate = projectPackage?.gates.find((candidate) => candidate.id === gateId);
+  return withGateWorkflowLock(async () => {
+    const packages = await readPackagesFile();
+    const projectPackage = packages.find(
+      (candidate) => candidate.projectId === projectId && candidate.id === packageId,
+    );
+    const gate = projectPackage?.gates.find((candidate) => candidate.id === gateId);
 
-  if (!projectPackage || !gate || !isGateInPreparation(gate)) {
-    return null;
-  }
+    if (!projectPackage || !gate || !isGateInPreparation(gate)) {
+      return null;
+    }
 
-  const approver: GateApprover = {
-    id: randomUUID(),
-    ...input,
-  };
+    const approver: GateApprover = {
+      id: randomUUID(),
+      ...input,
+    };
 
-  gate.approvers.push(approver);
-  projectPackage.updatedAt = new Date().toISOString();
-  await writePackagesFile(packages);
-  return approver;
+    gate.approvers.push(approver);
+    projectPackage.updatedAt = new Date().toISOString();
+    await writePackagesFile(packages);
+    return approver;
+  });
 }
 
 export async function updatePackageGateApprover(
@@ -438,26 +481,30 @@ export async function updatePackageGateApprover(
   approverId: string,
   input: GateApproverInput,
 ) {
-  const packages = await readPackagesFile();
-  const projectPackage = packages.find(
-    (candidate) => candidate.projectId === projectId && candidate.id === packageId,
-  );
-  const gate = projectPackage?.gates.find((candidate) => candidate.id === gateId);
-  const approverIndex = gate?.approvers.findIndex((approver) => approver.id === approverId) ?? -1;
+  return withGateWorkflowLock(async () => {
+    const packages = await readPackagesFile();
+    const projectPackage = packages.find(
+      (candidate) => candidate.projectId === projectId && candidate.id === packageId,
+    );
+    const gate = projectPackage?.gates.find((candidate) => candidate.id === gateId);
+    const approverIndex = gate?.approvers.findIndex(
+      (approver) => approver.id === approverId,
+    ) ?? -1;
 
-  if (!projectPackage || !gate || !isGateInPreparation(gate) || approverIndex === -1) {
-    return null;
-  }
+    if (!projectPackage || !gate || !isGateInPreparation(gate) || approverIndex === -1) {
+      return null;
+    }
 
-  const approver: GateApprover = {
-    id: approverId,
-    ...input,
-  };
+    const approver: GateApprover = {
+      id: approverId,
+      ...input,
+    };
 
-  gate.approvers[approverIndex] = approver;
-  projectPackage.updatedAt = new Date().toISOString();
-  await writePackagesFile(packages);
-  return approver;
+    gate.approvers[approverIndex] = approver;
+    projectPackage.updatedAt = new Date().toISOString();
+    await writePackagesFile(packages);
+    return approver;
+  });
 }
 
 export async function deletePackageGateApprover(
@@ -466,21 +513,25 @@ export async function deletePackageGateApprover(
   gateId: string,
   approverId: string,
 ) {
-  const packages = await readPackagesFile();
-  const projectPackage = packages.find(
-    (candidate) => candidate.projectId === projectId && candidate.id === packageId,
-  );
-  const gate = projectPackage?.gates.find((candidate) => candidate.id === gateId);
-  const approverIndex = gate?.approvers.findIndex((approver) => approver.id === approverId) ?? -1;
+  return withGateWorkflowLock(async () => {
+    const packages = await readPackagesFile();
+    const projectPackage = packages.find(
+      (candidate) => candidate.projectId === projectId && candidate.id === packageId,
+    );
+    const gate = projectPackage?.gates.find((candidate) => candidate.id === gateId);
+    const approverIndex = gate?.approvers.findIndex(
+      (approver) => approver.id === approverId,
+    ) ?? -1;
 
-  if (!projectPackage || !gate || !isGateInPreparation(gate) || approverIndex === -1) {
-    return false;
-  }
+    if (!projectPackage || !gate || !isGateInPreparation(gate) || approverIndex === -1) {
+      return false;
+    }
 
-  gate.approvers.splice(approverIndex, 1);
-  projectPackage.updatedAt = new Date().toISOString();
-  await writePackagesFile(packages);
-  return true;
+    gate.approvers.splice(approverIndex, 1);
+    projectPackage.updatedAt = new Date().toISOString();
+    await writePackagesFile(packages);
+    return true;
+  });
 }
 
 export async function createPackageGateCriterion(
@@ -489,31 +540,33 @@ export async function createPackageGateCriterion(
   gateId: string,
   input: GateCriterionInput,
 ) {
-  const packages = await readPackagesFile();
-  const packageIndex = packages.findIndex(
-    (projectPackage) => projectPackage.projectId === projectId && projectPackage.id === packageId,
-  );
+  return withGateWorkflowLock(async () => {
+    const packages = await readPackagesFile();
+    const packageIndex = packages.findIndex(
+      (projectPackage) => projectPackage.projectId === projectId && projectPackage.id === packageId,
+    );
 
-  if (packageIndex === -1) {
-    return null;
-  }
+    if (packageIndex === -1) {
+      return null;
+    }
 
-  const gate = packages[packageIndex].gates.find((gate) => gate.id === gateId);
+    const gate = packages[packageIndex].gates.find((gate) => gate.id === gateId);
 
-  if (!gate || !isGateInPreparation(gate)) {
-    return null;
-  }
+    if (!gate || !isGateInPreparation(gate)) {
+      return null;
+    }
 
-  const criterion: GateCriterion = {
-    id: randomUUID(),
-    templateId: null,
-    ...input,
-  };
+    const criterion: GateCriterion = {
+      id: randomUUID(),
+      templateId: null,
+      ...input,
+    };
 
-  gate.criteria.push(criterion);
-  packages[packageIndex].updatedAt = new Date().toISOString();
-  await writePackagesFile(packages);
-  return criterion;
+    gate.criteria.push(criterion);
+    packages[packageIndex].updatedAt = new Date().toISOString();
+    await writePackagesFile(packages);
+    return criterion;
+  });
 }
 
 export async function updatePackageGateCriterion(
@@ -523,32 +576,36 @@ export async function updatePackageGateCriterion(
   criterionId: string,
   input: GateCriterionInput,
 ) {
-  const packages = await readPackagesFile();
-  const packageIndex = packages.findIndex(
-    (projectPackage) => projectPackage.projectId === projectId && projectPackage.id === packageId,
-  );
+  return withGateWorkflowLock(async () => {
+    const packages = await readPackagesFile();
+    const packageIndex = packages.findIndex(
+      (projectPackage) => projectPackage.projectId === projectId && projectPackage.id === packageId,
+    );
 
-  if (packageIndex === -1) {
-    return null;
-  }
+    if (packageIndex === -1) {
+      return null;
+    }
 
-  const gate = packages[packageIndex].gates.find((gate) => gate.id === gateId);
-  const criterionIndex = gate?.criteria.findIndex((criterion) => criterion.id === criterionId) ?? -1;
+    const gate = packages[packageIndex].gates.find((gate) => gate.id === gateId);
+    const criterionIndex = gate?.criteria.findIndex(
+      (criterion) => criterion.id === criterionId,
+    ) ?? -1;
 
-  if (!gate || !isGateInPreparation(gate) || criterionIndex === -1) {
-    return null;
-  }
+    if (!gate || !isGateInPreparation(gate) || criterionIndex === -1) {
+      return null;
+    }
 
-  const criterion: GateCriterion = {
-    id: criterionId,
-    templateId: gate.criteria[criterionIndex].templateId,
-    ...input,
-  };
+    const criterion: GateCriterion = {
+      id: criterionId,
+      templateId: gate.criteria[criterionIndex].templateId,
+      ...input,
+    };
 
-  gate.criteria[criterionIndex] = criterion;
-  packages[packageIndex].updatedAt = new Date().toISOString();
-  await writePackagesFile(packages);
-  return criterion;
+    gate.criteria[criterionIndex] = criterion;
+    packages[packageIndex].updatedAt = new Date().toISOString();
+    await writePackagesFile(packages);
+    return criterion;
+  });
 }
 
 export async function deletePackageGateCriterion(
@@ -557,31 +614,36 @@ export async function deletePackageGateCriterion(
   gateId: string,
   criterionId: string,
 ) {
-  const packages = await readPackagesFile();
-  const packageIndex = packages.findIndex(
-    (projectPackage) => projectPackage.projectId === projectId && projectPackage.id === packageId,
-  );
+  return withGateWorkflowLock(async () => {
+    const packages = await readPackagesFile();
+    const packageIndex = packages.findIndex(
+      (projectPackage) => projectPackage.projectId === projectId && projectPackage.id === packageId,
+    );
 
-  if (packageIndex === -1) {
-    return false;
-  }
+    if (packageIndex === -1) {
+      return false;
+    }
 
-  const gate = packages[packageIndex].gates.find((gate) => gate.id === gateId);
-  const criterionIndex = gate?.criteria.findIndex((criterion) => criterion.id === criterionId) ?? -1;
+    const gate = packages[packageIndex].gates.find((gate) => gate.id === gateId);
+    const criterionIndex = gate?.criteria.findIndex(
+      (criterion) => criterion.id === criterionId,
+    ) ?? -1;
 
-  if (
-    !gate ||
-    !isGateInPreparation(gate) ||
-    criterionIndex === -1 ||
-    gate.criteria[criterionIndex].templateId
-  ) {
-    return false;
-  }
+    if (
+      !gate ||
+      !isGateInPreparation(gate) ||
+      criterionIndex === -1 ||
+      gate.criteria[criterionIndex].templateId
+    ) {
+      return false;
+    }
 
-  gate.criteria.splice(criterionIndex, 1);
-  packages[packageIndex].updatedAt = new Date().toISOString();
-  await writePackagesFile(packages);
-  return true;
+    gate.criteria.splice(criterionIndex, 1);
+    packages[packageIndex].updatedAt = new Date().toISOString();
+    await writePackagesFile(packages);
+    await removeCriterionFromDeliverables(criterionId);
+    return true;
+  });
 }
 
 export async function deletePackage(projectId: string, packageId: string) {

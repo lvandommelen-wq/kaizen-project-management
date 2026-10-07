@@ -15,6 +15,7 @@ import {
   parseReopenStatus,
   reopenProjectAction,
   updateProjectAction,
+  withGateWorkflowLock,
   withGovernanceTierWorkflowLock,
   type ProjectAction,
 } from "@/lib/project-actions";
@@ -145,11 +146,33 @@ export async function deleteProjectActionAction(
   returnQuery: string,
   actionId: string,
 ) {
-  const context = await getActionContext(projectId);
-  const action = await getProjectAction(projectId, actionId);
-  if (!action) notFound();
+  const { context, action, result } = await withGateWorkflowLock(async () => {
+    const context = await getActionContext(projectId);
+    const action = await getProjectAction(projectId, actionId);
+    if (!action) notFound();
 
-  const result = await deleteProjectAction(projectId, actionId);
+    const awaitingCycle = [
+      ...context.project.gates,
+      ...context.packages.flatMap((projectPackage) => projectPackage.gates),
+    ]
+      .flatMap((gate) => gate.reviewCycles)
+      .find(
+        (cycle) =>
+          cycle.status === "awaiting_approval" &&
+          cycle.frozenEvidence.acceptedActions.some(
+            (acceptedAction) => acceptedAction.actionId === actionId,
+          ),
+      );
+    const result = awaitingCycle
+      ? {
+          deleted: false as const,
+          reason: `This Gate Action is accepted in active Review Cycle ${awaitingCycle.cycleNumber} and must remain available until the review is complete.`,
+        }
+      : await deleteProjectAction(projectId, actionId);
+
+    return { context, action, result };
+  });
+
   if (!result.deleted) {
     redirect(
       actionRegisterPath(projectId, returnQuery, {

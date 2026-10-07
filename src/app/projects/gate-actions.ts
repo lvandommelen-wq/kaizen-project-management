@@ -6,13 +6,14 @@ import {
   createDeliverable,
   deleteDeliverable,
   parseDeliverableFormData,
-  removeCriterionFromDeliverables,
   updateDeliverable,
 } from "@/lib/deliverables";
 import {
+  gateReviewApproverResponseOutcomes,
   isGateInPreparation,
   parseGateApproverFormData,
   parseGateCriterionFormData,
+  type GateReviewResponseInput,
 } from "@/lib/gates";
 import {
   createPackageGateApprover,
@@ -22,9 +23,11 @@ import {
   getPackage,
   getPackages,
   reopenPackageGate,
+  respondToPackageGateReview,
   submitPackageGateForApproval,
   updatePackageGateApprover,
   updatePackageGateCriterion,
+  withdrawPackageGateSubmission,
 } from "@/lib/packages";
 import {
   createGateProjectAction,
@@ -38,9 +41,11 @@ import {
   deleteProjectGateCriterion,
   getProject,
   reopenProjectGate,
+  respondToProjectGateReview,
   submitProjectGateForApproval,
   updateProjectGateApprover,
   updateProjectGateCriterion,
+  withdrawProjectGateSubmission,
 } from "@/lib/projects";
 
 export async function submitProjectGateForApprovalAction(projectId: string, gateId: string) {
@@ -75,6 +80,92 @@ export async function submitPackageGateForApprovalAction(
 
   revalidatePackageGate(projectId, packageId, gateId);
   redirect(`${packageGatePath(projectId, packageId, gateId)}?submitted=${result.reviewCycle.cycleNumber}`);
+}
+
+export async function respondToProjectGateReviewAction(
+  projectId: string,
+  gateId: string,
+  formData: FormData,
+) {
+  const result = await respondToProjectGateReview(
+    projectId,
+    gateId,
+    parseDevelopmentGateReviewResponse(formData),
+  );
+
+  if (!result) {
+    notFound();
+  }
+
+  const path = projectGatePath(projectId, gateId);
+  if (result.outcome !== "recorded") {
+    redirect(withApprovalError(path, result.outcome));
+  }
+
+  revalidateProjectGate(projectId, gateId);
+  revalidatePath(`/projects/${projectId}/actions`);
+  redirect(path);
+}
+
+export async function respondToPackageGateReviewAction(
+  projectId: string,
+  packageId: string,
+  gateId: string,
+  formData: FormData,
+) {
+  const result = await respondToPackageGateReview(
+    projectId,
+    packageId,
+    gateId,
+    parseDevelopmentGateReviewResponse(formData),
+  );
+
+  if (!result) {
+    notFound();
+  }
+
+  const path = packageGatePath(projectId, packageId, gateId);
+  if (result.outcome !== "recorded") {
+    redirect(withApprovalError(path, result.outcome));
+  }
+
+  revalidatePackageGate(projectId, packageId, gateId);
+  revalidatePath(`/projects/${projectId}/actions`);
+  redirect(path);
+}
+
+export async function withdrawProjectGateSubmissionAction(projectId: string, gateId: string) {
+  const result = await withdrawProjectGateSubmission(projectId, gateId);
+
+  if (!result) {
+    notFound();
+  }
+
+  if (result.outcome !== "withdrawn") {
+    redirect(projectGatePath(projectId, gateId));
+  }
+
+  revalidateProjectGate(projectId, gateId);
+  redirect(projectGatePath(projectId, gateId));
+}
+
+export async function withdrawPackageGateSubmissionAction(
+  projectId: string,
+  packageId: string,
+  gateId: string,
+) {
+  const result = await withdrawPackageGateSubmission(projectId, packageId, gateId);
+
+  if (!result) {
+    notFound();
+  }
+
+  if (result.outcome !== "withdrawn") {
+    redirect(packageGatePath(projectId, packageId, gateId));
+  }
+
+  revalidatePackageGate(projectId, packageId, gateId);
+  redirect(packageGatePath(projectId, packageId, gateId));
 }
 
 export async function createProjectGateActionAction(projectId: string, gateId: string, formData: FormData) {
@@ -283,8 +374,6 @@ export async function deletePackageGateApproverAction(
 }
 
 export async function createProjectGateCriterionAction(projectId: string, gateId: string, formData: FormData) {
-  await requireProjectGatePreparation(projectId, gateId);
-
   const criterion = await createProjectGateCriterion(projectId, gateId, parseGateCriterionFormData(formData));
 
   if (!criterion) {
@@ -327,7 +416,6 @@ export async function deleteProjectGateCriterionAction(
     notFound();
   }
 
-  await removeCriterionFromDeliverables(criterionId);
   revalidateProjectGate(projectId, gateId);
   redirect(projectGatePath(projectId, gateId));
 }
@@ -338,8 +426,6 @@ export async function createPackageGateCriterionAction(
   gateId: string,
   formData: FormData,
 ) {
-  await requirePackageGatePreparation(projectId, packageId, gateId);
-
   const criterion = await createPackageGateCriterion(
     projectId,
     packageId,
@@ -390,23 +476,24 @@ export async function deletePackageGateCriterionAction(
     notFound();
   }
 
-  await removeCriterionFromDeliverables(criterionId);
   revalidatePackageGate(projectId, packageId, gateId);
   redirect(packageGatePath(projectId, packageId, gateId));
 }
 
 export async function createProjectDeliverableAction(projectId: string, gateId: string, formData: FormData) {
-  const { gate } = await requireProjectGatePreparation(projectId, gateId);
+  await withGateWorkflowLock(async () => {
+    const { gate } = await requireProjectGatePreparation(projectId, gateId);
 
-  await createDeliverable(
-    parseDeliverableFormData(formData, {
-      projectId,
-      packageId: null,
-      gateId,
-      stageId: gate.stageId,
-      validCriterionIds: gate.criteria.map((criterion) => criterion.id),
-    }),
-  );
+    await createDeliverable(
+      parseDeliverableFormData(formData, {
+        projectId,
+        packageId: null,
+        gateId,
+        stageId: gate.stageId,
+        validCriterionIds: gate.criteria.map((criterion) => criterion.id),
+      }),
+    );
+  });
 
   revalidateProjectGate(projectId, gateId);
   redirect(projectGatePath(projectId, gateId));
@@ -418,22 +505,24 @@ export async function updateProjectDeliverableAction(
   deliverableId: string,
   formData: FormData,
 ) {
-  const { gate } = await requireProjectGatePreparation(projectId, gateId);
+  await withGateWorkflowLock(async () => {
+    const { gate } = await requireProjectGatePreparation(projectId, gateId);
 
-  const deliverable = await updateDeliverable(
-    deliverableId,
-    parseDeliverableFormData(formData, {
-      projectId,
-      packageId: null,
-      gateId,
-      stageId: gate.stageId,
-      validCriterionIds: gate.criteria.map((criterion) => criterion.id),
-    }),
-  );
+    const deliverable = await updateDeliverable(
+      deliverableId,
+      parseDeliverableFormData(formData, {
+        projectId,
+        packageId: null,
+        gateId,
+        stageId: gate.stageId,
+        validCriterionIds: gate.criteria.map((criterion) => criterion.id),
+      }),
+    );
 
-  if (!deliverable) {
-    notFound();
-  }
+    if (!deliverable) {
+      notFound();
+    }
+  });
 
   revalidateProjectGate(projectId, gateId);
   redirect(projectGatePath(projectId, gateId));
@@ -444,12 +533,18 @@ export async function deleteProjectDeliverableAction(
   gateId: string,
   deliverableId: string,
 ) {
-  await requireProjectGatePreparation(projectId, gateId);
-  const deleted = await deleteDeliverable(deliverableId, { projectId, packageId: null, gateId });
+  await withGateWorkflowLock(async () => {
+    await requireProjectGatePreparation(projectId, gateId);
+    const deleted = await deleteDeliverable(deliverableId, {
+      projectId,
+      packageId: null,
+      gateId,
+    });
 
-  if (!deleted) {
-    notFound();
-  }
+    if (!deleted) {
+      notFound();
+    }
+  });
 
   revalidateProjectGate(projectId, gateId);
   redirect(projectGatePath(projectId, gateId));
@@ -461,17 +556,19 @@ export async function createPackageDeliverableAction(
   gateId: string,
   formData: FormData,
 ) {
-  const { gate } = await requirePackageGatePreparation(projectId, packageId, gateId);
+  await withGateWorkflowLock(async () => {
+    const { gate } = await requirePackageGatePreparation(projectId, packageId, gateId);
 
-  await createDeliverable(
-    parseDeliverableFormData(formData, {
-      projectId,
-      packageId,
-      gateId,
-      stageId: gate.stageId,
-      validCriterionIds: gate.criteria.map((criterion) => criterion.id),
-    }),
-  );
+    await createDeliverable(
+      parseDeliverableFormData(formData, {
+        projectId,
+        packageId,
+        gateId,
+        stageId: gate.stageId,
+        validCriterionIds: gate.criteria.map((criterion) => criterion.id),
+      }),
+    );
+  });
 
   revalidatePackageGate(projectId, packageId, gateId);
   redirect(packageGatePath(projectId, packageId, gateId));
@@ -484,22 +581,24 @@ export async function updatePackageDeliverableAction(
   deliverableId: string,
   formData: FormData,
 ) {
-  const { gate } = await requirePackageGatePreparation(projectId, packageId, gateId);
+  await withGateWorkflowLock(async () => {
+    const { gate } = await requirePackageGatePreparation(projectId, packageId, gateId);
 
-  const deliverable = await updateDeliverable(
-    deliverableId,
-    parseDeliverableFormData(formData, {
-      projectId,
-      packageId,
-      gateId,
-      stageId: gate.stageId,
-      validCriterionIds: gate.criteria.map((criterion) => criterion.id),
-    }),
-  );
+    const deliverable = await updateDeliverable(
+      deliverableId,
+      parseDeliverableFormData(formData, {
+        projectId,
+        packageId,
+        gateId,
+        stageId: gate.stageId,
+        validCriterionIds: gate.criteria.map((criterion) => criterion.id),
+      }),
+    );
 
-  if (!deliverable) {
-    notFound();
-  }
+    if (!deliverable) {
+      notFound();
+    }
+  });
 
   revalidatePackageGate(projectId, packageId, gateId);
   redirect(packageGatePath(projectId, packageId, gateId));
@@ -511,12 +610,18 @@ export async function deletePackageDeliverableAction(
   gateId: string,
   deliverableId: string,
 ) {
-  await requirePackageGatePreparation(projectId, packageId, gateId);
-  const deleted = await deleteDeliverable(deliverableId, { projectId, packageId, gateId });
+  await withGateWorkflowLock(async () => {
+    await requirePackageGatePreparation(projectId, packageId, gateId);
+    const deleted = await deleteDeliverable(deliverableId, {
+      projectId,
+      packageId,
+      gateId,
+    });
 
-  if (!deleted) {
-    notFound();
-  }
+    if (!deleted) {
+      notFound();
+    }
+  });
 
   revalidatePackageGate(projectId, packageId, gateId);
   redirect(packageGatePath(projectId, packageId, gateId));
@@ -540,6 +645,42 @@ async function requirePackageGatePreparation(projectId: string, packageId: strin
   if (!isGateInPreparation(gate)) redirect(packageGatePath(projectId, packageId, gateId));
 
   return { projectPackage, gate };
+}
+
+function parseDevelopmentGateReviewResponse(
+  formData: FormData,
+): GateReviewResponseInput {
+  if (process.env.NODE_ENV !== "development") {
+    throw new Error(
+      "The temporary Approver test identity is disabled in production.",
+    );
+  }
+
+  const reviewCycleId = String(formData.get("reviewCycleId") ?? "").trim();
+  const gateApproverId = String(formData.get("gateApproverId") ?? "").trim();
+  const outcome = String(formData.get("outcome") ?? "");
+  if (!reviewCycleId || !gateApproverId) {
+    throw new Error("Select an eligible frozen Approver.");
+  }
+  if (
+    !gateReviewApproverResponseOutcomes.includes(
+      outcome as GateReviewResponseInput["outcome"],
+    )
+  ) {
+    throw new Error("Select a valid approval response.");
+  }
+
+  return {
+    reviewCycleId,
+    gateApproverId,
+    outcome: outcome as GateReviewResponseInput["outcome"],
+    comment: String(formData.get("comment") ?? "").trim(),
+  };
+}
+
+function withApprovalError(path: string, outcome: string) {
+  const query = new URLSearchParams({ approvalError: outcome });
+  return `${path}?${query}`;
 }
 
 function projectGatePath(projectId: string, gateId: string) {

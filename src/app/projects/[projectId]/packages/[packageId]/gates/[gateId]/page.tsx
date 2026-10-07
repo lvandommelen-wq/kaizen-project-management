@@ -9,10 +9,12 @@ import {
   deletePackageGateApproverAction,
   deletePackageGateCriterionAction,
   reopenPackageGateAction,
+  respondToPackageGateReviewAction,
   submitPackageGateForApprovalAction,
   updatePackageDeliverableAction,
   updatePackageGateApproverAction,
   updatePackageGateCriterionAction,
+  withdrawPackageGateSubmissionAction,
 } from "@/app/projects/gate-actions";
 import { getGateDeliverables } from "@/lib/deliverables";
 import { getPackage, packageStageLabels } from "@/lib/packages";
@@ -51,6 +53,13 @@ export default async function PackageGatePage({
       backLabel="Package"
       contextLabel={`${projectPackage.packageCode} - ${projectPackage.packageName}`}
       actionRegisterHref={`/projects/${project.id}/actions?packageId=${encodeURIComponent(projectPackage.id)}`}
+      approvalError={parseQueryValue(query.approvalError)}
+      approvalResponseAction={respondToPackageGateReviewAction.bind(
+        null,
+        project.id,
+        projectPackage.id,
+        gate.id,
+      )}
       createApproverAction={createPackageGateApproverAction.bind(
         null,
         project.id,
@@ -130,6 +139,12 @@ export default async function PackageGatePage({
         projectPackage.id,
         gate.id,
       )}
+      withdrawSubmissionAction={withdrawPackageGateSubmissionAction.bind(
+        null,
+        project.id,
+        projectPackage.id,
+        gate.id,
+      )}
     />
   );
 }
@@ -137,4 +152,8 @@ export default async function PackageGatePage({
 function parseCycleNumber(value: string | string[] | undefined) {
   const cycleNumber = Number(Array.isArray(value) ? value[0] : value);
   return Number.isInteger(cycleNumber) && cycleNumber > 0 ? cycleNumber : undefined;
+}
+
+function parseQueryValue(value: string | string[] | undefined) {
+  return Array.isArray(value) ? value[0] : value;
 }

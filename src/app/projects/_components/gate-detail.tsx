@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { ConfirmationAction } from "./confirmation-action";
+import { GateApprovalTestPanel } from "./gate-approval-test-panel";
 import {
   deliverableStatusLabels,
   deliverableStatuses,
@@ -10,8 +11,10 @@ import {
   gateCriterionStatuses,
   gateReviewCycleStatusLabels,
   gateStatusLabels,
+  canWithdrawGateReviewCycle,
   getAwaitingGateReviewCycle,
   getGateCriterionStatusLabel,
+  getGateReviewApprovalState,
   getGateSubmissionIssues,
   isGateInPreparation,
   type Gate,
@@ -47,6 +50,8 @@ type GateDetailProps = {
   isCurrentGate: boolean;
   packages: { id: string; label: string }[];
   actionRegisterHref: string;
+  approvalError?: string;
+  approvalResponseAction: FormAction;
   reopenAction: FormAction;
   scopeLabel: string;
   stageLabel: string;
@@ -55,6 +60,7 @@ type GateDetailProps = {
   updateApproverAction: UpdateFormAction;
   updateCriterionAction: UpdateFormAction;
   updateDeliverableAction: UpdateFormAction;
+  withdrawSubmissionAction: FormAction;
 };
 
 export function GateDetail({
@@ -75,6 +81,8 @@ export function GateDetail({
   isCurrentGate,
   packages,
   actionRegisterHref,
+  approvalError,
+  approvalResponseAction,
   reopenAction,
   scopeLabel,
   stageLabel,
@@ -83,9 +91,13 @@ export function GateDetail({
   updateApproverAction,
   updateCriterionAction,
   updateDeliverableAction,
+  withdrawSubmissionAction,
 }: GateDetailProps) {
   const openGateActions = gateActions.filter((action) => action.status !== "closed");
   const awaitingReviewCycle = getAwaitingGateReviewCycle(gate);
+  const awaitingApprovalState = awaitingReviewCycle
+    ? getGateReviewApprovalState(awaitingReviewCycle)
+    : null;
   const canPrepare = isGateInPreparation(gate);
   const canConfigureApprovers = canPrepare;
   const canAddGateAction = isCurrentGate && canPrepare;
@@ -132,9 +144,9 @@ export function GateDetail({
       </div>
 
       <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <SummaryCard label="Gate status" value={gateStatusLabels[gate.status]} valueClassName={gateStatusClass(gate.status)} />
-        <SummaryCard label="Related stage" value={stageLabel} />
         <SummaryCard label="Scope level" value={scopeLabel} />
+        <SummaryCard label="Stage" value={stageLabel} />
+        <SummaryCard label="Gate status" value={gateStatusLabels[gate.status]} valueClassName={gateStatusClass(gate.status)} />
         <SummaryCard
           label="Approval status"
           value={approvalStatus.value}
@@ -237,11 +249,45 @@ export function GateDetail({
         </div>
 
         {awaitingReviewCycle ? (
-          <p className="mt-5 rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
-            Review Cycle {awaitingReviewCycle.cycleNumber}
-            {submittedCycleNumber === awaitingReviewCycle.cycleNumber ? " was" : " is"} submitted for approval.
-            The Gate Status is Submitted for Approval, and the {scopeLabel} Stage remains {stageLabel}.
-          </p>
+          <div className="mt-5 space-y-4">
+            <p className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+              Review Cycle {awaitingReviewCycle.cycleNumber}
+              {submittedCycleNumber === awaitingReviewCycle.cycleNumber ? " was" : " is"} submitted for approval.
+              The Gate Status is Submitted for Approval, and the {scopeLabel} Stage remains {stageLabel}.
+            </p>
+            {canWithdrawGateReviewCycle(awaitingReviewCycle) ? (
+              <ConfirmationAction
+                action={withdrawSubmissionAction}
+                buttonLabel="Withdraw Submission"
+                confirmLabel="Withdraw Submission"
+                message={`Withdraw Review Cycle ${awaitingReviewCycle.cycleNumber} from approval? The current Review Cycle will be preserved as Withdrawn, the Gate will become editable again, and a later resubmission will create a new Review Cycle.`}
+                title="Withdraw Submission"
+              />
+            ) : (
+              <p className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
+                Withdrawal is unavailable because at least one Approver has submitted a formal response.
+              </p>
+            )}
+            {approvalError ? (
+              <p className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-900">
+                {approvalErrorMessage(approvalError)}
+              </p>
+            ) : null}
+            {process.env.NODE_ENV === "development" &&
+            awaitingApprovalState &&
+            awaitingApprovalState.eligibleApprovers.length > 0 ? (
+              <GateApprovalTestPanel
+                key={`${awaitingReviewCycle.id}:${awaitingApprovalState.eligibleApprovers.map((approver) => approver.gateApproverId).join(",")}`}
+                acceptedActionCount={awaitingReviewCycle.frozenEvidence.acceptedActions.filter(
+                  (action) => action.status !== "closed",
+                ).length}
+                action={approvalResponseAction}
+                approvers={awaitingApprovalState.eligibleApprovers}
+                reviewCycleId={awaitingReviewCycle.id}
+                reviewCycleNumber={awaitingReviewCycle.cycleNumber}
+              />
+            ) : null}
+          </div>
         ) : gate.status === "approved" || gate.status === "approved_with_actions" ? (
           <div className="mt-5 space-y-4">
             <p className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
@@ -252,7 +298,7 @@ export function GateDetail({
               action={reopenAction}
               buttonLabel="Reopen Gate"
               confirmLabel="Reopen Gate"
-              message="This resets the Gate decision to Not reviewed. It does not change the current Stage or remove existing Gate information."
+              message="This resets the Gate decision to Not Submitted. It does not change the current Stage or remove existing Gate information."
               title="Reopen Gate"
             />
           </div>
@@ -569,6 +615,19 @@ function ReviewHistory({ cycles }: { cycles: GateReviewCycle[] }) {
                   <p className="mt-2 text-sm text-slate-700">
                     Submitted {formatDateTime(cycle.submittedAt)} by {cycle.submittedBy.displayName}
                   </p>
+                  {cycle.withdrawnAt && cycle.withdrawnBy ? (
+                    <p className="mt-1 text-sm text-slate-700">
+                      Withdrawn {formatDateTime(cycle.withdrawnAt)} by {cycle.withdrawnBy.displayName}
+                    </p>
+                  ) : null}
+                  {cycle.withdrawalReason ? (
+                    <p className="mt-1 text-sm text-slate-600">Withdrawal reason: {cycle.withdrawalReason}</p>
+                  ) : null}
+                  {cycle.completedAt && cycle.status !== "withdrawn" ? (
+                    <p className="mt-1 text-sm text-slate-700">
+                      Completed {formatDateTime(cycle.completedAt)} with {gateReviewCycleStatusLabels[cycle.status]}
+                    </p>
+                  ) : null}
                   {cycle.previousCycleId ? (
                     <p className="mt-1 text-xs text-slate-500">Follows Review Cycle ID {cycle.previousCycleId}</p>
                   ) : null}
@@ -578,7 +637,10 @@ function ReviewHistory({ cycles }: { cycles: GateReviewCycle[] }) {
                 </span>
               </div>
 
-              <details className="mt-4 border-t border-slate-100 pt-3">
+              <details
+                className="mt-4 border-t border-slate-100 pt-3"
+                open={cycle.status === "awaiting_approval"}
+              >
                 <summary className="cursor-pointer text-sm font-semibold text-slate-700">
                   View frozen Review Cycle
                 </summary>
@@ -768,8 +830,8 @@ function ApproverForm({
   );
 }
 
-function groupApproversByLevel(approvers: Gate["approvers"]) {
-  const groups = new Map<number, Gate["approvers"]>();
+function groupApproversByLevel<Approver extends { approvalLevel: number }>(approvers: Approver[]) {
+  const groups = new Map<number, Approver[]>();
 
   for (const approver of approvers) {
     const group = groups.get(approver.approvalLevel) ?? [];
@@ -1044,67 +1106,96 @@ function getApprovalStatus(gate: Gate) {
   const latestCycle = [...gate.reviewCycles]
     .sort((left, right) => right.cycleNumber - left.cycleNumber)[0];
 
-  if (gate.status === "approved" || gate.status === "approved_with_actions") {
-    const approvedCount = latestCycle?.approvers.filter(
-      (approver) => approver.response?.outcome === "approved",
-    ).length ?? 0;
-    const responseCount = latestCycle?.approvers.filter((approver) => approver.response !== null).length ?? 0;
-    const totalCount = latestCycle?.approvers.length ?? 0;
+  if (gate.status === "not_submitted") {
+    return { value: "Not submitted", valueClassName: "text-slate-700" };
+  }
 
+  if (gate.status === "returned_for_rework") {
+    return { value: "Returned for Rework", valueClassName: "text-red-700" };
+  }
+
+  const currentCycle = gate.status === "submitted_for_approval"
+    ? getAwaitingGateReviewCycle(gate)
+    : latestCycle;
+
+  if (!currentCycle) {
+    return gate.status === "approved" || gate.status === "approved_with_actions"
+      ? { value: "Complete", valueClassName: "text-emerald-700" }
+      : { value: "Approval configuration unavailable", valueClassName: "text-amber-700" };
+  }
+
+  const approvalState = getGateReviewApprovalState(currentCycle);
+  const { approvedCount, totalCount } = approvalState;
+  const isComplete = totalCount > 0 && approvedCount === totalCount;
+
+  if (gate.status === "approved" || gate.status === "approved_with_actions") {
     return {
-      value: "Complete",
-      detail: responseCount > 0 ? `${approvedCount} / ${totalCount} approved` : undefined,
+      value: isComplete ? `Complete — ${approvedCount} / ${totalCount} approved` : "Complete",
       valueClassName: "text-emerald-700",
     };
   }
 
-  if (!latestCycle) {
-    if (gate.status === "returned_for_rework") {
-      return { value: "Returned for Rework", valueClassName: "text-red-700" };
-    }
-
-    if (gate.status === "submitted_for_approval") {
-      return { value: "Submitted", valueClassName: "text-amber-700" };
-    }
-
-    return { value: "Not submitted", valueClassName: "text-slate-700" };
-  }
-
-  const returnedResponse = latestCycle.approvers.some(
+  const returnedResponse = currentCycle.approvers.some(
     (approver) => approver.response?.outcome === "returned_for_rework",
   );
-  if (latestCycle.status === "returned_for_rework" || returnedResponse) {
+  if (currentCycle.status === "returned_for_rework" || returnedResponse) {
     return { value: "Returned for Rework", valueClassName: "text-red-700" };
   }
 
-  const approvedCount = latestCycle.approvers.filter(
+  if (
+    currentCycle.status === "approved" ||
+    currentCycle.status === "approved_with_actions" ||
+    isComplete
+  ) {
+    return {
+      value: isComplete ? `Complete — ${approvedCount} / ${totalCount} approved` : "Complete",
+      valueClassName: "text-emerald-700",
+    };
+  }
+
+  if (approvalState.activeLevel === null) {
+    return { value: "Approval configuration unavailable", valueClassName: "text-amber-700" };
+  }
+
+  const activeLevelApprovers = currentCycle.approvers.filter(
+    (approver) => approver.approvalLevel === approvalState.activeLevel,
+  );
+  const levelApprovedCount = activeLevelApprovers.filter(
     (approver) => approver.response?.outcome === "approved",
   ).length;
-  const responseCount = latestCycle.approvers.filter((approver) => approver.response !== null).length;
-  const totalCount = latestCycle.approvers.length;
-  const detail = responseCount > 0 ? `${approvedCount} / ${totalCount} approved` : undefined;
-
-  if (
-    latestCycle.status === "approved" ||
-    latestCycle.status === "approved_with_actions" ||
-    (totalCount > 0 && approvedCount === totalCount)
-  ) {
-    return { value: "Complete", detail, valueClassName: "text-emerald-700" };
-  }
-
-  if (responseCount === 0) {
-    return { value: "Submitted", valueClassName: "text-amber-700" };
-  }
-
-  const activeLevel = latestCycle.approvers
-    .filter((approver) => approver.response?.outcome !== "approved")
-    .sort((left, right) => left.approvalLevel - right.approvalLevel)[0]?.approvalLevel;
 
   return {
-    value: activeLevel ? `Awaiting Level ${activeLevel}` : "Submitted",
-    detail,
+    value: `Level ${approvalState.activeLevel} — ${levelApprovedCount} / ${activeLevelApprovers.length} approved`,
+    detail: new Set(currentCycle.approvers.map((approver) => approver.approvalLevel)).size > 1
+      ? `${approvedCount} / ${totalCount} total approvals`
+      : undefined,
     valueClassName: "text-amber-700",
   };
+}
+
+function approvalErrorMessage(error: string) {
+  if (error === "already_responded") {
+    return "This frozen Approver has already responded to the current Review Cycle.";
+  }
+  if (error === "not_eligible") {
+    return "This Approver is not eligible yet. All Approvers at earlier Approval Levels must approve first.";
+  }
+  if (error === "comment_required") {
+    return "A return reason is required when returning a Gate for rework.";
+  }
+  if (error === "accepted_actions_missing") {
+    return "A Gate Action accepted in the frozen Review Cycle is missing from the Master Action Register. Return the Gate for rework and resubmit it before approval can complete.";
+  }
+  if (error === "review_cycle_mismatch") {
+    return "This response was created for an earlier Review Cycle. Refresh the Gate and respond to the current cycle.";
+  }
+  if (error === "approver_not_found") {
+    return "The selected Approver is not part of the current frozen Review Cycle.";
+  }
+  if (error === "not_current") {
+    return "This Gate no longer belongs to the current Stage and cannot accept a response.";
+  }
+  return "This Review Cycle is no longer accepting approval responses.";
 }
 
 function gateCriterionStatusPriority(status: Gate["criteria"][number]["status"]) {
@@ -1173,6 +1264,10 @@ function gateReviewCycleStatusClass(status: GateReviewCycle["status"]) {
 
   if (status === "returned_for_rework") {
     return "status-red";
+  }
+
+  if (status === "withdrawn") {
+    return "status-not_assessed";
   }
 
   return "status-amber";

@@ -3,7 +3,10 @@
 import { revalidatePath } from "next/cache";
 import { notFound, redirect } from "next/navigation";
 import { deleteDeliverablesForPackage } from "@/lib/deliverables";
-import { hasActionsForPackage } from "@/lib/project-actions";
+import {
+  hasActionsForPackage,
+  withGateWorkflowLock,
+} from "@/lib/project-actions";
 import { getProject } from "@/lib/projects";
 import {
   createPackage,
@@ -71,17 +74,19 @@ export async function returnPackageToPreviousStageAction(projectId: string, pack
 }
 
 export async function deletePackageAction(projectId: string, packageId: string) {
-  if (await hasActionsForPackage(projectId, packageId)) {
-    redirect(`/projects/${projectId}/packages/${packageId}?deleteError=linked-actions`);
-  }
+  await withGateWorkflowLock(async () => {
+    if (await hasActionsForPackage(projectId, packageId)) {
+      redirect(`/projects/${projectId}/packages/${packageId}?deleteError=linked-actions`);
+    }
 
-  const deleted = await deletePackage(projectId, packageId);
+    const deleted = await deletePackage(projectId, packageId);
 
-  if (!deleted) {
-    notFound();
-  }
+    if (!deleted) {
+      notFound();
+    }
 
-  await deleteDeliverablesForPackage(projectId, packageId);
+    await deleteDeliverablesForPackage(projectId, packageId);
+  });
 
   revalidatePath("/projects");
   revalidatePath(`/projects/${projectId}`);

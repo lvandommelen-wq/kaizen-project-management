@@ -1,25 +1,24 @@
 export const gateStatuses = [
-  "not_reviewed",
+  "not_submitted",
   "submitted_for_approval",
   "approved",
   "approved_with_actions",
   "returned_for_rework",
 ] as const;
-export const gateDecisions = ["approved", "approved_with_actions", "rejected_rework"] as const;
 export const pmGateDecisions = ["approved", "approved_with_actions"] as const;
 export const gateCriterionStatuses = ["pending", "completed", "not_applicable"] as const;
 export const gateReviewCycleStatuses = [
   "awaiting_approval",
+  "withdrawn",
   "returned_for_rework",
   "approved",
   "approved_with_actions",
 ] as const;
 export const gateReviewApproverResponseOutcomes = ["approved", "returned_for_rework"] as const;
 export const gateReviewBaselineTypes = ["scope", "cost", "schedule", "other"] as const;
-export const gateReviewCycleSchemaVersion = 1 as const;
+export const gateReviewCycleSchemaVersion = 2 as const;
 
 export type GateStatus = (typeof gateStatuses)[number];
-export type GateDecision = (typeof gateDecisions)[number];
 export type PmGateDecision = (typeof pmGateDecisions)[number];
 export type GateCriterionStatus = (typeof gateCriterionStatuses)[number];
 export type GateReviewCycleStatus = (typeof gateReviewCycleStatuses)[number];
@@ -151,6 +150,9 @@ export type GateReviewCycle = {
   decision: PmGateDecision | null;
   decisionComments: string;
   completedAt: string | null;
+  withdrawnAt: string | null;
+  withdrawnBy: GateReviewActorSnapshot | null;
+  withdrawalReason: string | null;
   frozenEvidence: GateReviewFrozenEvidence;
   approvers: GateReviewApproverSnapshot[];
   relatedReworkActionIds: string[];
@@ -202,6 +204,45 @@ export type CreateGateReviewCycleInput = {
   gateActions: GateSubmissionAction[];
 };
 
+export type WithdrawGateReviewCycleInput = {
+  withdrawnAt: string;
+  withdrawnBy: GateReviewActorSnapshot;
+  withdrawalReason?: string | null;
+};
+
+export type GateReviewResponseInput = {
+  reviewCycleId: string;
+  gateApproverId: string;
+  outcome: GateReviewApproverResponseOutcome;
+  comment: string;
+};
+
+export type GateReviewApprovalState = {
+  activeLevel: number | null;
+  approvedCount: number;
+  eligibleApprovers: GateReviewApproverSnapshot[];
+  totalCount: number;
+};
+
+export type GateReviewResponseCompletion =
+  | "pending"
+  | "returned_for_rework"
+  | PmGateDecision;
+
+export type GateReviewResponseTransition =
+  | {
+      outcome: "recorded";
+      reviewCycle: GateReviewCycle;
+      completion: GateReviewResponseCompletion;
+      acceptedActionIds: string[];
+    }
+  | { outcome: "not_submitted" }
+  | { outcome: "review_cycle_mismatch" }
+  | { outcome: "approver_not_found" }
+  | { outcome: "already_responded" }
+  | { outcome: "not_eligible" }
+  | { outcome: "comment_required" };
+
 export type Gate<StageId extends string = string> = {
   id: string;
   templateVersion: number;
@@ -228,7 +269,7 @@ export type GateDefinition<StageId extends string> = {
 };
 
 export const gateStatusLabels: Record<GateStatus, string> = {
-  not_reviewed: "Not reviewed",
+  not_submitted: "Not Submitted",
   submitted_for_approval: "Submitted for Approval",
   approved: "Approved",
   approved_with_actions: "Approved with Actions",
@@ -247,6 +288,7 @@ export function getGateCriterionStatusLabel(status: GateReviewCriterionSnapshot[
 
 export const gateReviewCycleStatusLabels: Record<GateReviewCycleStatus, string> = {
   awaiting_approval: "Submitted for Approval",
+  withdrawn: "Withdrawn",
   returned_for_rework: "Returned for Rework",
   approved: "Approved",
   approved_with_actions: "Approved with Actions",
@@ -255,24 +297,27 @@ export const gateReviewCycleStatusLabels: Record<GateReviewCycleStatus, string> 
 export type GateCriterionInput = Omit<GateCriterion, "id" | "templateId">;
 export type GateApproverInput = Omit<GateApprover, "id">;
 
-export type GateReviewReadiness = {
-  incompleteCriteria: GateCriterion[];
-  incompleteDeliverables: { id: string; title: string; status: string }[];
-  isReadyForApproval: boolean;
-};
-
-export type GateReviewResult<Entity> =
-  | { outcome: "reviewed"; entity: Entity }
-  | { outcome: "incomplete" }
-  | { outcome: "actions_required" }
-  | { outcome: "open_gate_actions" }
-  | { outcome: "already_decided" }
-  | { outcome: "not_current" };
-
 export type GateSubmissionResult<Entity> =
   | { outcome: "submitted"; entity: Entity; reviewCycle: GateReviewCycle }
   | { outcome: "blocked"; issues: GateSubmissionIssue[] }
   | { outcome: "not_in_preparation" }
+  | { outcome: "not_current" };
+
+export type GateWithdrawalResult<Entity> =
+  | { outcome: "withdrawn"; entity: Entity; reviewCycle: GateReviewCycle }
+  | { outcome: "responses_recorded" }
+  | { outcome: "not_submitted" }
+  | { outcome: "not_current" };
+
+export type GateReviewResponseResult<Entity> =
+  | {
+      outcome: "recorded";
+      entity: Entity;
+      reviewCycle: GateReviewCycle;
+      completion: GateReviewResponseCompletion;
+    }
+  | Exclude<GateReviewResponseTransition, { outcome: "recorded" }>
+  | { outcome: "accepted_actions_missing" }
   | { outcome: "not_current" };
 
 export function createGates<StageId extends string>(
@@ -284,7 +329,7 @@ export function createGates<StageId extends string>(
     templateVersion: definition.templateVersion,
     name: definition.name,
     stageId: definition.stageId,
-    status: "not_reviewed",
+    status: "not_submitted",
     approvers: [],
     reviewCycles: [],
     criteria: (definition.criteria ?? []).map((criterion) => ({
@@ -353,7 +398,13 @@ export function gatesRequireTemplateUpdate<StageId extends string>(
 
     if (
       gate.reviewCycles.some(
-        (cycle) => (cycle.status as string) === "submitted" || !cycle.gate.stageLabel,
+        (cycle) =>
+          cycle.schemaVersion !== gateReviewCycleSchemaVersion ||
+          (cycle.status as string) === "submitted" ||
+          !cycle.gate.stageLabel ||
+          !("withdrawnAt" in cycle) ||
+          !("withdrawnBy" in cycle) ||
+          !("withdrawalReason" in cycle),
       )
     ) {
       return true;
@@ -418,53 +469,151 @@ export function parseGateApproverFormData(formData: FormData): GateApproverInput
   };
 }
 
-export function parseGateDecisionFormData(formData: FormData): GateDecision {
-  const decision = String(formData.get("decision") ?? "");
-
-  if (!gateDecisions.includes(decision as GateDecision)) {
-    throw new Error("Invalid Gate decision.");
-  }
-
-  return decision as GateDecision;
-}
-
-export function parsePmGateDecisionFormData(formData: FormData): PmGateDecision {
-  const decision = String(formData.get("decision") ?? "");
-
-  if (!pmGateDecisions.includes(decision as PmGateDecision)) {
-    throw new Error("Invalid Project Manager Gate decision.");
-  }
-
-  return decision as PmGateDecision;
-}
-
-export function getGateReviewReadiness(
-  gate: Gate,
-  deliverables: { id: string; title: string; status: string }[],
-): GateReviewReadiness {
-  const incompleteCriteria = gate.criteria.filter(
-    (criterion) => criterion.status !== "completed" && criterion.status !== "not_applicable",
-  );
-  const incompleteDeliverables = deliverables.filter(
-    (deliverable) => deliverable.status !== "completed" && deliverable.status !== "not_applicable",
-  );
-
-  return {
-    incompleteCriteria,
-    incompleteDeliverables,
-    isReadyForApproval: incompleteCriteria.length === 0 && incompleteDeliverables.length === 0,
-  };
-}
-
 export function getAwaitingGateReviewCycle(gate: Gate) {
   return [...gate.reviewCycles]
     .sort((left, right) => right.cycleNumber - left.cycleNumber)
     .find((cycle) => cycle.status === "awaiting_approval") ?? null;
 }
 
+export function canWithdrawGateReviewCycle(cycle: GateReviewCycle) {
+  return cycle.status === "awaiting_approval" && cycle.approvers.every((approver) => approver.response === null);
+}
+
+export function withdrawGateReviewCycle(gate: Gate, input: WithdrawGateReviewCycleInput) {
+  const reviewCycle = getAwaitingGateReviewCycle(gate);
+
+  if (gate.status !== "submitted_for_approval" || !reviewCycle) {
+    return { outcome: "not_submitted" as const };
+  }
+
+  if (!canWithdrawGateReviewCycle(reviewCycle)) {
+    return { outcome: "responses_recorded" as const };
+  }
+
+  reviewCycle.status = "withdrawn";
+  reviewCycle.completedAt = input.withdrawnAt;
+  reviewCycle.withdrawnAt = input.withdrawnAt;
+  reviewCycle.withdrawnBy = { ...input.withdrawnBy };
+  reviewCycle.withdrawalReason = input.withdrawalReason ?? null;
+  gate.status = "not_submitted";
+
+  return { outcome: "withdrawn" as const, reviewCycle };
+}
+
+export function getGateReviewApprovalState(
+  cycle: GateReviewCycle,
+): GateReviewApprovalState {
+  const pendingApprovers = cycle.approvers.filter(
+    (approver) => approver.response === null,
+  );
+  const activeLevel = pendingApprovers.length > 0
+    ? Math.min(...pendingApprovers.map((approver) => approver.approvalLevel))
+    : null;
+
+  return {
+    activeLevel,
+    approvedCount: cycle.approvers.filter(
+      (approver) => approver.response?.outcome === "approved",
+    ).length,
+    eligibleApprovers: activeLevel === null
+      ? []
+      : pendingApprovers.filter(
+          (approver) => approver.approvalLevel === activeLevel,
+        ),
+    totalCount: cycle.approvers.length,
+  };
+}
+
+export function recordGateReviewResponse(
+  gate: Gate,
+  input: GateReviewResponseInput,
+  respondedAt: string,
+): GateReviewResponseTransition {
+  const reviewCycle = getAwaitingGateReviewCycle(gate);
+  if (gate.status !== "submitted_for_approval" || !reviewCycle) {
+    return { outcome: "not_submitted" };
+  }
+  if (reviewCycle.id !== input.reviewCycleId) {
+    return { outcome: "review_cycle_mismatch" };
+  }
+
+  const approver = reviewCycle.approvers.find(
+    (candidate) => candidate.gateApproverId === input.gateApproverId,
+  );
+  if (!approver) {
+    return { outcome: "approver_not_found" };
+  }
+  if (approver.response) {
+    return { outcome: "already_responded" };
+  }
+
+  const approvalState = getGateReviewApprovalState(reviewCycle);
+  if (approver.approvalLevel !== approvalState.activeLevel) {
+    return { outcome: "not_eligible" };
+  }
+
+  const comment = input.comment.trim();
+  if (input.outcome === "returned_for_rework" && !comment) {
+    return { outcome: "comment_required" };
+  }
+
+  approver.response = {
+    outcome: input.outcome,
+    respondedAt,
+    respondedBy: {
+      userId: null,
+      displayName: approver.name,
+      email: approver.email,
+    },
+    comment,
+  };
+
+  if (input.outcome === "returned_for_rework") {
+    reviewCycle.status = "returned_for_rework";
+    reviewCycle.decision = null;
+    reviewCycle.decisionComments = comment;
+    reviewCycle.completedAt = respondedAt;
+    gate.status = "returned_for_rework";
+    return {
+      outcome: "recorded",
+      reviewCycle,
+      completion: "returned_for_rework",
+      acceptedActionIds: [],
+    };
+  }
+
+  const nextState = getGateReviewApprovalState(reviewCycle);
+  if (nextState.eligibleApprovers.length > 0) {
+    return {
+      outcome: "recorded",
+      reviewCycle,
+      completion: "pending",
+      acceptedActionIds: [],
+    };
+  }
+
+  const acceptedActionIds = reviewCycle.frozenEvidence.acceptedActions
+    .filter((action) => action.status !== "closed")
+    .map((action) => action.actionId);
+  const decision: PmGateDecision = acceptedActionIds.length > 0
+    ? "approved_with_actions"
+    : "approved";
+  reviewCycle.status = decision;
+  reviewCycle.decision = decision;
+  reviewCycle.completedAt = respondedAt;
+  gate.status = decision;
+
+  return {
+    outcome: "recorded",
+    reviewCycle,
+    completion: decision,
+    acceptedActionIds,
+  };
+}
+
 export function isGateInPreparation(gate: Gate) {
   return (
-    (gate.status === "not_reviewed" || gate.status === "returned_for_rework") &&
+    (gate.status === "not_submitted" || gate.status === "returned_for_rework") &&
     getAwaitingGateReviewCycle(gate) === null
   );
 }
@@ -586,6 +735,9 @@ export function createGateReviewCycle(input: CreateGateReviewCycleInput): GateRe
     decision: null,
     decisionComments: "",
     completedAt: null,
+    withdrawnAt: null,
+    withdrawnBy: null,
+    withdrawalReason: null,
     frozenEvidence: {
       frozenAt: input.submittedAt,
       criteria: input.gate.criteria.map((criterion) => ({
@@ -603,16 +755,18 @@ export function createGateReviewCycle(input: CreateGateReviewCycleInput): GateRe
         status: deliverable.status,
         criterionIds: [...deliverable.criterionIds],
       })),
-      acceptedActions: input.gateActions.map((action) => ({
-        actionId: action.id,
-        sequence: action.sequence,
-        description: action.description,
-        assignee: action.assignee,
-        dueDate: action.dueDate,
-        status: action.status,
-        priority: action.priority,
-        packageIds: [...action.packageIds],
-      })),
+      acceptedActions: input.gateActions
+        .filter((action) => action.status !== "closed")
+        .map((action) => ({
+          actionId: action.id,
+          sequence: action.sequence,
+          description: action.description,
+          assignee: action.assignee,
+          dueDate: action.dueDate,
+          status: action.status,
+          priority: action.priority,
+          packageIds: [...action.packageIds],
+        })),
       documents: [],
       baselines: [],
     },
@@ -730,10 +884,14 @@ function normalizeGateReviewCycles(reviewCycles: GateReviewCycle[] | undefined) 
 
   return reviewCycles.map((cycle) => ({
     ...cycle,
+    schemaVersion: gateReviewCycleSchemaVersion,
     status:
       (cycle.status as string) === "submitted"
         ? "awaiting_approval" as const
         : cycle.status,
+    withdrawnAt: cycle.withdrawnAt ?? null,
+    withdrawnBy: cycle.withdrawnBy ? { ...cycle.withdrawnBy } : null,
+    withdrawalReason: cycle.withdrawalReason ?? null,
     gate: {
       ...cycle.gate,
       stageLabel: cycle.gate.stageLabel || cycle.gate.stageId,
@@ -760,11 +918,19 @@ function normalizeGateStatus(
     return "returned_for_rework";
   }
 
+  if (latestCycle?.status === "withdrawn") {
+    return "not_submitted";
+  }
+
   if ((status as string) === "rejected_rework") {
     return "returned_for_rework";
   }
 
-  return gateStatuses.includes(status as GateStatus) ? (status as GateStatus) : "not_reviewed";
+  if ((status as string) === "not_reviewed") {
+    return "not_submitted";
+  }
+
+  return gateStatuses.includes(status as GateStatus) ? (status as GateStatus) : "not_submitted";
 }
 
 function normalizeGateCriterion(

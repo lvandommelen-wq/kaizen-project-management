@@ -9,10 +9,12 @@ import {
   deleteProjectGateApproverAction,
   deleteProjectGateCriterionAction,
   reopenProjectGateAction,
+  respondToProjectGateReviewAction,
   submitProjectGateForApprovalAction,
   updateProjectDeliverableAction,
   updateProjectGateApproverAction,
   updateProjectGateCriterionAction,
+  withdrawProjectGateSubmissionAction,
 } from "@/app/projects/gate-actions";
 import { getGateDeliverables } from "@/lib/deliverables";
 import { getPackages } from "@/lib/packages";
@@ -46,6 +48,12 @@ export default async function ProjectGatePage({
       backLabel="Project"
       contextLabel={`${project.projectNumber} - ${project.name}`}
       actionRegisterHref={`/projects/${project.id}/actions`}
+      approvalError={parseQueryValue(query.approvalError)}
+      approvalResponseAction={respondToProjectGateReviewAction.bind(
+        null,
+        project.id,
+        gate.id,
+      )}
       createApproverAction={createProjectGateApproverAction.bind(null, project.id, gate.id)}
       createCriterionAction={createProjectGateCriterionAction.bind(null, project.id, gate.id)}
       createDeliverableAction={createProjectDeliverableAction.bind(null, project.id, gate.id)}
@@ -70,6 +78,7 @@ export default async function ProjectGatePage({
       updateApproverAction={updateProjectGateApproverAction.bind(null, project.id, gate.id)}
       updateCriterionAction={updateProjectGateCriterionAction.bind(null, project.id, gate.id)}
       updateDeliverableAction={updateProjectDeliverableAction.bind(null, project.id, gate.id)}
+      withdrawSubmissionAction={withdrawProjectGateSubmissionAction.bind(null, project.id, gate.id)}
     />
   );
 }
@@ -77,4 +86,8 @@ export default async function ProjectGatePage({
 function parseCycleNumber(value: string | string[] | undefined) {
   const cycleNumber = Number(Array.isArray(value) ? value[0] : value);
   return Number.isInteger(cycleNumber) && cycleNumber > 0 ? cycleNumber : undefined;
+}
+
+function parseQueryValue(value: string | string[] | undefined) {
+  return Array.isArray(value) ? value[0] : value;
 }

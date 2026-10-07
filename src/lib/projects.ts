@@ -1,29 +1,33 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { ensureDefaultDeliverables, getGateDeliverables } from "./deliverables";
+import {
+  ensureDefaultDeliverables,
+  getGateDeliverables,
+  removeCriterionFromDeliverables,
+} from "./deliverables";
 import {
   createGateReviewCycle,
   createGates,
-  gatesRequireTemplateUpdate,
   getGateSubmissionIssues,
-  getGateReviewReadiness,
   isGateInPreparation,
   normalizeGates,
+  recordGateReviewResponse,
+  withdrawGateReviewCycle,
   type Gate,
   type GateApprover,
   type GateApproverInput,
   type GateCriterion,
   type GateCriterionInput,
-  type GateDecision,
-  type GateReviewResult,
+  type GateReviewResponseInput,
+  type GateReviewResponseResult,
   type GateSubmissionResult,
+  type GateWithdrawalResult,
 } from "./gates";
 import { getProjectGateTemplates } from "./governance-templates";
 import {
   getGovernanceTierActionReferences,
   getGateActions,
-  getOpenGateActions,
   protectGateActionsForDecision,
   rollbackGateActionProtection,
   withGateWorkflowLock,
@@ -140,18 +144,7 @@ async function readProjectsFile(): Promise<Project[]> {
   await ensureDataFile();
   const contents = await readFile(projectsFile, "utf8");
   const storedProjects = JSON.parse(contents) as Partial<Project>[];
-  const requiresTemplateUpdate = storedProjects.some((project) =>
-    gatesRequireTemplateUpdate(
-      project.id ?? "",
-      project.gates,
-      getProjectGateTemplates(Boolean(project.validationRequired)),
-    ),
-  );
   const projects = storedProjects.map(normalizeProject);
-
-  if (requiresTemplateUpdate) {
-    await writeProjectsFile(projects);
-  }
 
   return projects.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
@@ -183,42 +176,47 @@ export async function getProject(projectId: string) {
 }
 
 export async function createProject(input: ProjectFormInput) {
-  const projects = await readProjectsFile();
-  const now = new Date().toISOString();
-  const id = randomUUID();
-  const project: Project = {
-    id,
-    ...input,
-    currentStage: "initiation",
-    governanceTiers: [],
-    gates: createGates(id, getProjectGateTemplates(input.validationRequired)),
-    createdAt: now,
-    updatedAt: now,
-  };
+  return withGateWorkflowLock(async () => {
+    const projects = await readProjectsFile();
+    const now = new Date().toISOString();
+    const id = randomUUID();
+    const project: Project = {
+      id,
+      ...input,
+      currentStage: "initiation",
+      governanceTiers: [],
+      gates: createGates(id, getProjectGateTemplates(input.validationRequired)),
+      createdAt: now,
+      updatedAt: now,
+    };
 
-  await writeProjectsFile([project, ...projects]);
-  await ensureProjectDefaultDeliverables(project);
-  return project;
+    await writeProjectsFile([project, ...projects]);
+    await ensureProjectDefaultDeliverables(project);
+    return project;
+  });
 }
 
 export async function updateProject(projectId: string, input: ProjectFormInput) {
-  const projects = await readProjectsFile();
-  const index = projects.findIndex((project) => project.id === projectId);
+  return withGateWorkflowLock(async () => {
+    const projects = await readProjectsFile();
+    const index = projects.findIndex((project) => project.id === projectId);
 
-  if (index === -1) {
-    return null;
-  }
+    if (index === -1) {
+      return null;
+    }
 
-  const updatedProject: Project = {
-    ...projects[index],
-    ...input,
-    updatedAt: new Date().toISOString(),
-  };
+    const updatedProject: Project = {
+      ...projects[index],
+      ...input,
+      currentStage: projects[index].currentStage,
+      updatedAt: new Date().toISOString(),
+    };
 
-  projects[index] = updatedProject;
-  await writeProjectsFile(projects);
+    projects[index] = updatedProject;
+    await writeProjectsFile(projects);
 
-  return updatedProject;
+    return updatedProject;
+  });
 }
 
 export function parseGovernanceTierFormData(formData: FormData): GovernanceTierInput {
@@ -235,8 +233,10 @@ export async function createProjectGovernanceTier(
   projectId: string,
   input: GovernanceTierInput,
 ) {
-  return withGovernanceTierWorkflowLock(() =>
-    createProjectGovernanceTierWithoutWorkflowLock(projectId, input),
+  return withGateWorkflowLock(() =>
+    withGovernanceTierWorkflowLock(() =>
+      createProjectGovernanceTierWithoutWorkflowLock(projectId, input),
+    ),
   );
 }
 
@@ -265,11 +265,13 @@ export async function updateProjectGovernanceTier(
   governanceTierId: string,
   input: GovernanceTierInput,
 ) {
-  return withGovernanceTierWorkflowLock(() =>
-    updateProjectGovernanceTierWithoutWorkflowLock(
-      projectId,
-      governanceTierId,
-      input,
+  return withGateWorkflowLock(() =>
+    withGovernanceTierWorkflowLock(() =>
+      updateProjectGovernanceTierWithoutWorkflowLock(
+        projectId,
+        governanceTierId,
+        input,
+      ),
     ),
   );
 }
@@ -299,11 +301,13 @@ export async function moveProjectGovernanceTier(
   governanceTierId: string,
   direction: "up" | "down",
 ) {
-  return withGovernanceTierWorkflowLock(() =>
-    moveProjectGovernanceTierWithoutWorkflowLock(
-      projectId,
-      governanceTierId,
-      direction,
+  return withGateWorkflowLock(() =>
+    withGovernanceTierWorkflowLock(() =>
+      moveProjectGovernanceTierWithoutWorkflowLock(
+        projectId,
+        governanceTierId,
+        direction,
+      ),
     ),
   );
 }
@@ -341,10 +345,12 @@ export async function deleteProjectGovernanceTier(
   projectId: string,
   governanceTierId: string,
 ) {
-  return withGovernanceTierWorkflowLock(() =>
-    deleteProjectGovernanceTierWithoutWorkflowLock(
-      projectId,
-      governanceTierId,
+  return withGateWorkflowLock(() =>
+    withGovernanceTierWorkflowLock(() =>
+      deleteProjectGovernanceTierWithoutWorkflowLock(
+        projectId,
+        governanceTierId,
+      ),
     ),
   );
 }
@@ -459,129 +465,169 @@ export async function submitProjectGateForApproval(
   });
 }
 
-export async function reviewProjectGate(
+export async function withdrawProjectGateSubmission(
   projectId: string,
   gateId: string,
-  decision: GateDecision,
-): Promise<GateReviewResult<Project> | null> {
-  return withGateWorkflowLock(() =>
-    reviewProjectGateWithoutWorkflowLock(projectId, gateId, decision),
-  );
+): Promise<GateWithdrawalResult<Project> | null> {
+  return withGateWorkflowLock(async () => {
+    const projects = await readProjectsFile();
+    const project = projects.find((candidate) => candidate.id === projectId);
+    const gate = project?.gates.find((candidate) => candidate.id === gateId);
+
+    if (!project || !gate) {
+      return null;
+    }
+
+    if (gate.stageId !== project.currentStage) {
+      return { outcome: "not_current" };
+    }
+
+    const now = new Date().toISOString();
+    const result = withdrawGateReviewCycle(gate, {
+      withdrawnAt: now,
+      withdrawnBy: {
+        userId: null,
+        displayName: project.projectManager,
+        email: null,
+      },
+    });
+
+    if (result.outcome !== "withdrawn") {
+      return result;
+    }
+
+    project.updatedAt = now;
+    await writeProjectsFile(projects);
+
+    return { ...result, entity: project };
+  });
 }
 
-async function reviewProjectGateWithoutWorkflowLock(
+export async function respondToProjectGateReview(
   projectId: string,
   gateId: string,
-  decision: GateDecision,
-): Promise<GateReviewResult<Project> | null> {
-  const projects = await readProjectsFile();
-  const index = projects.findIndex((project) => project.id === projectId);
+  input: GateReviewResponseInput,
+): Promise<GateReviewResponseResult<Project> | null> {
+  return withGateWorkflowLock(async () => {
+    const projects = await readProjectsFile();
+    const project = projects.find((candidate) => candidate.id === projectId);
+    const gate = project?.gates.find((candidate) => candidate.id === gateId);
 
-  if (index === -1) {
-    return null;
-  }
-
-  const project = projects[index];
-  const gate = project.gates.find((candidate) => candidate.id === gateId);
-
-  if (!gate) {
-    return null;
-  }
-
-  if (gate.stageId !== project.currentStage) {
-    return { outcome: "not_current" };
-  }
-
-  if (!isGateInPreparation(gate)) {
-    return { outcome: "already_decided" };
-  }
-
-  await ensureProjectDefaultDeliverables(project);
-  const deliverables = await getGateDeliverables(project.id, null, gate.id);
-  const readiness = getGateReviewReadiness(gate, deliverables);
-  const openGateActions = await getOpenGateActions(project.id, gate.id);
-
-  if (decision === "approved" && !readiness.isReadyForApproval) {
-    return { outcome: "incomplete" };
-  }
-
-  if (decision === "approved" && openGateActions.length > 0) {
-    return { outcome: "open_gate_actions" };
-  }
-
-  if (decision === "approved_with_actions" && openGateActions.length === 0) {
-    return { outcome: "actions_required" };
-  }
-
-  const protection = await protectGateActionsForDecision(project.id, gate.id, decision);
-  if (protection.outcome !== "protected") {
-    return { outcome: protection.outcome };
-  }
-  gate.status = decision === "rejected_rework" ? "returned_for_rework" : decision;
-
-  if (decision !== "rejected_rework") {
-    const nextStage = getNextProjectStage(project.currentStage, project.validationRequired);
-
-    if (nextStage) {
-      project.currentStage = nextStage;
+    if (!project || !gate) {
+      return null;
     }
-  }
 
-  project.updatedAt = new Date().toISOString();
+    if (gate.stageId !== project.currentStage) {
+      return { outcome: "not_current" };
+    }
 
-  projects[index] = project;
-  try {
-    await writeProjectsFile(projects);
-  } catch (error) {
-    await rollbackGateActionProtection(project.id, protection.referenceIds);
-    throw error;
-  }
+    const now = new Date().toISOString();
+    const transition = recordGateReviewResponse(gate, input, now);
+    if (transition.outcome !== "recorded") {
+      return transition;
+    }
 
-  return { outcome: "reviewed", entity: project };
+    let referenceIds: string[] = [];
+    if (transition.completion === "approved_with_actions") {
+      const protection = await protectGateActionsForDecision(
+        project.id,
+        gate.id,
+        transition.completion,
+        transition.acceptedActionIds,
+      );
+      if (protection.outcome !== "protected") {
+        return protection;
+      }
+      referenceIds = protection.referenceIds;
+    }
+
+    if (
+      transition.completion === "approved" ||
+      transition.completion === "approved_with_actions"
+    ) {
+      const nextStage = getNextProjectStage(
+        project.currentStage,
+        project.validationRequired,
+      );
+      if (nextStage) {
+        project.currentStage = nextStage;
+      }
+    }
+
+    project.updatedAt = now;
+    try {
+      await writeProjectsFile(projects);
+    } catch (error) {
+      await rollbackGateActionProtection(project.id, referenceIds);
+      throw error;
+    }
+
+    return {
+      outcome: "recorded",
+      entity: project,
+      reviewCycle: transition.reviewCycle,
+      completion: transition.completion,
+    };
+  });
 }
 
 export async function reopenProjectGate(projectId: string, gateId: string) {
-  const projects = await readProjectsFile();
-  const project = projects.find((candidate) => candidate.id === projectId);
-  const gate = project?.gates.find((candidate) => candidate.id === gateId);
+  return withGateWorkflowLock(async () => {
+    const projects = await readProjectsFile();
+    const project = projects.find((candidate) => candidate.id === projectId);
+    const gate = project?.gates.find((candidate) => candidate.id === gateId);
 
-  if (!project || !gate) {
-    return null;
-  }
+    if (!project || !gate) {
+      return null;
+    }
 
-  if (gate.status !== "not_reviewed") {
-    gate.status = "not_reviewed";
-    project.updatedAt = new Date().toISOString();
-    await writeProjectsFile(projects);
-  }
+    if (gate.status === "approved" || gate.status === "approved_with_actions") {
+      gate.status = "not_submitted";
+      project.updatedAt = new Date().toISOString();
+      await writeProjectsFile(projects);
+    }
 
-  return project;
+    return project;
+  });
 }
 
 export async function returnProjectToPreviousStage(projectId: string) {
-  const projects = await readProjectsFile();
-  const index = projects.findIndex((project) => project.id === projectId);
+  return withGateWorkflowLock(async () => {
+    const projects = await readProjectsFile();
+    const index = projects.findIndex((project) => project.id === projectId);
 
-  if (index === -1) {
-    return null;
-  }
+    if (index === -1) {
+      return null;
+    }
 
-  const previousStage = getPreviousProjectStage(projects[index].currentStage, projects[index].validationRequired);
+    if (
+      projects[index].gates.some(
+        (gate) => gate.status === "submitted_for_approval",
+      )
+    ) {
+      return projects[index];
+    }
 
-  if (!previousStage) {
-    return projects[index];
-  }
+    const previousStage = getPreviousProjectStage(
+      projects[index].currentStage,
+      projects[index].validationRequired,
+    );
 
-  const updatedProject: Project = {
-    ...projects[index],
-    currentStage: previousStage,
-    updatedAt: new Date().toISOString(),
-  };
+    if (!previousStage) {
+      return projects[index];
+    }
 
-  projects[index] = updatedProject;
-  await writeProjectsFile(projects);
+    const updatedProject: Project = {
+      ...projects[index],
+      currentStage: previousStage,
+      updatedAt: new Date().toISOString(),
+    };
 
-  return updatedProject;
+    projects[index] = updatedProject;
+    await writeProjectsFile(projects);
+
+    return updatedProject;
+  });
 }
 
 export async function createProjectGateApprover(
@@ -589,23 +635,25 @@ export async function createProjectGateApprover(
   gateId: string,
   input: GateApproverInput,
 ) {
-  const projects = await readProjectsFile();
-  const project = projects.find((candidate) => candidate.id === projectId);
-  const gate = project?.gates.find((candidate) => candidate.id === gateId);
+  return withGateWorkflowLock(async () => {
+    const projects = await readProjectsFile();
+    const project = projects.find((candidate) => candidate.id === projectId);
+    const gate = project?.gates.find((candidate) => candidate.id === gateId);
 
-  if (!project || !gate || !isGateInPreparation(gate)) {
-    return null;
-  }
+    if (!project || !gate || !isGateInPreparation(gate)) {
+      return null;
+    }
 
-  const approver: GateApprover = {
-    id: randomUUID(),
-    ...input,
-  };
+    const approver: GateApprover = {
+      id: randomUUID(),
+      ...input,
+    };
 
-  gate.approvers.push(approver);
-  project.updatedAt = new Date().toISOString();
-  await writeProjectsFile(projects);
-  return approver;
+    gate.approvers.push(approver);
+    project.updatedAt = new Date().toISOString();
+    await writeProjectsFile(projects);
+    return approver;
+  });
 }
 
 export async function updateProjectGateApprover(
@@ -614,24 +662,28 @@ export async function updateProjectGateApprover(
   approverId: string,
   input: GateApproverInput,
 ) {
-  const projects = await readProjectsFile();
-  const project = projects.find((candidate) => candidate.id === projectId);
-  const gate = project?.gates.find((candidate) => candidate.id === gateId);
-  const approverIndex = gate?.approvers.findIndex((approver) => approver.id === approverId) ?? -1;
+  return withGateWorkflowLock(async () => {
+    const projects = await readProjectsFile();
+    const project = projects.find((candidate) => candidate.id === projectId);
+    const gate = project?.gates.find((candidate) => candidate.id === gateId);
+    const approverIndex = gate?.approvers.findIndex(
+      (approver) => approver.id === approverId,
+    ) ?? -1;
 
-  if (!project || !gate || !isGateInPreparation(gate) || approverIndex === -1) {
-    return null;
-  }
+    if (!project || !gate || !isGateInPreparation(gate) || approverIndex === -1) {
+      return null;
+    }
 
-  const approver: GateApprover = {
-    id: approverId,
-    ...input,
-  };
+    const approver: GateApprover = {
+      id: approverId,
+      ...input,
+    };
 
-  gate.approvers[approverIndex] = approver;
-  project.updatedAt = new Date().toISOString();
-  await writeProjectsFile(projects);
-  return approver;
+    gate.approvers[approverIndex] = approver;
+    project.updatedAt = new Date().toISOString();
+    await writeProjectsFile(projects);
+    return approver;
+  });
 }
 
 export async function deleteProjectGateApprover(
@@ -639,19 +691,23 @@ export async function deleteProjectGateApprover(
   gateId: string,
   approverId: string,
 ) {
-  const projects = await readProjectsFile();
-  const project = projects.find((candidate) => candidate.id === projectId);
-  const gate = project?.gates.find((candidate) => candidate.id === gateId);
-  const approverIndex = gate?.approvers.findIndex((approver) => approver.id === approverId) ?? -1;
+  return withGateWorkflowLock(async () => {
+    const projects = await readProjectsFile();
+    const project = projects.find((candidate) => candidate.id === projectId);
+    const gate = project?.gates.find((candidate) => candidate.id === gateId);
+    const approverIndex = gate?.approvers.findIndex(
+      (approver) => approver.id === approverId,
+    ) ?? -1;
 
-  if (!project || !gate || !isGateInPreparation(gate) || approverIndex === -1) {
-    return false;
-  }
+    if (!project || !gate || !isGateInPreparation(gate) || approverIndex === -1) {
+      return false;
+    }
 
-  gate.approvers.splice(approverIndex, 1);
-  project.updatedAt = new Date().toISOString();
-  await writeProjectsFile(projects);
-  return true;
+    gate.approvers.splice(approverIndex, 1);
+    project.updatedAt = new Date().toISOString();
+    await writeProjectsFile(projects);
+    return true;
+  });
 }
 
 export async function createProjectGateCriterion(
@@ -659,29 +715,31 @@ export async function createProjectGateCriterion(
   gateId: string,
   input: GateCriterionInput,
 ) {
-  const projects = await readProjectsFile();
-  const projectIndex = projects.findIndex((project) => project.id === projectId);
+  return withGateWorkflowLock(async () => {
+    const projects = await readProjectsFile();
+    const projectIndex = projects.findIndex((project) => project.id === projectId);
 
-  if (projectIndex === -1) {
-    return null;
-  }
+    if (projectIndex === -1) {
+      return null;
+    }
 
-  const gate = projects[projectIndex].gates.find((gate) => gate.id === gateId);
+    const gate = projects[projectIndex].gates.find((gate) => gate.id === gateId);
 
-  if (!gate || !isGateInPreparation(gate)) {
-    return null;
-  }
+    if (!gate || !isGateInPreparation(gate)) {
+      return null;
+    }
 
-  const criterion: GateCriterion = {
-    id: randomUUID(),
-    templateId: null,
-    ...input,
-  };
+    const criterion: GateCriterion = {
+      id: randomUUID(),
+      templateId: null,
+      ...input,
+    };
 
-  gate.criteria.push(criterion);
-  projects[projectIndex].updatedAt = new Date().toISOString();
-  await writeProjectsFile(projects);
-  return criterion;
+    gate.criteria.push(criterion);
+    projects[projectIndex].updatedAt = new Date().toISOString();
+    await writeProjectsFile(projects);
+    return criterion;
+  });
 }
 
 export async function updateProjectGateCriterion(
@@ -690,56 +748,65 @@ export async function updateProjectGateCriterion(
   criterionId: string,
   input: GateCriterionInput,
 ) {
-  const projects = await readProjectsFile();
-  const projectIndex = projects.findIndex((project) => project.id === projectId);
+  return withGateWorkflowLock(async () => {
+    const projects = await readProjectsFile();
+    const projectIndex = projects.findIndex((project) => project.id === projectId);
 
-  if (projectIndex === -1) {
-    return null;
-  }
+    if (projectIndex === -1) {
+      return null;
+    }
 
-  const gate = projects[projectIndex].gates.find((gate) => gate.id === gateId);
-  const criterionIndex = gate?.criteria.findIndex((criterion) => criterion.id === criterionId) ?? -1;
+    const gate = projects[projectIndex].gates.find((gate) => gate.id === gateId);
+    const criterionIndex = gate?.criteria.findIndex(
+      (criterion) => criterion.id === criterionId,
+    ) ?? -1;
 
-  if (!gate || !isGateInPreparation(gate) || criterionIndex === -1) {
-    return null;
-  }
+    if (!gate || !isGateInPreparation(gate) || criterionIndex === -1) {
+      return null;
+    }
 
-  const criterion: GateCriterion = {
-    id: criterionId,
-    templateId: gate.criteria[criterionIndex].templateId,
-    ...input,
-  };
+    const criterion: GateCriterion = {
+      id: criterionId,
+      templateId: gate.criteria[criterionIndex].templateId,
+      ...input,
+    };
 
-  gate.criteria[criterionIndex] = criterion;
-  projects[projectIndex].updatedAt = new Date().toISOString();
-  await writeProjectsFile(projects);
-  return criterion;
+    gate.criteria[criterionIndex] = criterion;
+    projects[projectIndex].updatedAt = new Date().toISOString();
+    await writeProjectsFile(projects);
+    return criterion;
+  });
 }
 
 export async function deleteProjectGateCriterion(projectId: string, gateId: string, criterionId: string) {
-  const projects = await readProjectsFile();
-  const projectIndex = projects.findIndex((project) => project.id === projectId);
+  return withGateWorkflowLock(async () => {
+    const projects = await readProjectsFile();
+    const projectIndex = projects.findIndex((project) => project.id === projectId);
 
-  if (projectIndex === -1) {
-    return false;
-  }
+    if (projectIndex === -1) {
+      return false;
+    }
 
-  const gate = projects[projectIndex].gates.find((gate) => gate.id === gateId);
-  const criterionIndex = gate?.criteria.findIndex((criterion) => criterion.id === criterionId) ?? -1;
+    const gate = projects[projectIndex].gates.find((gate) => gate.id === gateId);
+    const criterionIndex = gate?.criteria.findIndex(
+      (criterion) => criterion.id === criterionId,
+    ) ?? -1;
 
-  if (
-    !gate ||
-    !isGateInPreparation(gate) ||
-    criterionIndex === -1 ||
-    gate.criteria[criterionIndex].templateId
-  ) {
-    return false;
-  }
+    if (
+      !gate ||
+      !isGateInPreparation(gate) ||
+      criterionIndex === -1 ||
+      gate.criteria[criterionIndex].templateId
+    ) {
+      return false;
+    }
 
-  gate.criteria.splice(criterionIndex, 1);
-  projects[projectIndex].updatedAt = new Date().toISOString();
-  await writeProjectsFile(projects);
-  return true;
+    gate.criteria.splice(criterionIndex, 1);
+    projects[projectIndex].updatedAt = new Date().toISOString();
+    await writeProjectsFile(projects);
+    await removeCriterionFromDeliverables(criterionId);
+    return true;
+  });
 }
 
 export async function deleteProject(projectId: string) {

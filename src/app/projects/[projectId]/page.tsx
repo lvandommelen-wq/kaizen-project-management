@@ -118,7 +118,7 @@ export default async function ProjectDetailPage({
                 href={`/projects/${project.id}/gates/${encodeURIComponent(currentGate.id)}`}
                 className="button-primary"
               >
-                {currentGate.status === "not_reviewed" ? "Review" : "View"} {currentGate.name}
+                {currentGate.status === "not_submitted" ? "Prepare" : "View"} {currentGate.name}
               </Link>
             ) : null}
           </div>

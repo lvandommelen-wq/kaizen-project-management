@@ -113,7 +113,7 @@ export default async function PackageDetailPage({
                 href={`/projects/${project.id}/packages/${projectPackage.id}/gates/${encodeURIComponent(currentGate.id)}`}
                 className="button-primary"
               >
-                {currentGate.status === "not_reviewed" ? "Review" : "View"} {currentGate.name}
+                {currentGate.status === "not_submitted" ? "Prepare" : "View"} {currentGate.name}
               </Link>
             ) : null}
           </div>
