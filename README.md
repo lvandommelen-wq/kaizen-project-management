@@ -2,19 +2,22 @@ This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-
 
 ## Getting Started
 
-First, run the development server:
+Local development uses PostgreSQL for identity and operational data. Ensure the
+configured local PostgreSQL server is running, check the migration state, and
+then start the development server:
 
 ```bash
+npm run db:migrate:status
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+
+The ignored `.env.local` must select `OPERATIONAL_DATA_BACKEND=postgres`. The
+local `DATABASE_URL` may use `sslmode=disable` only for a loopback PostgreSQL
+server. If PostgreSQL is unavailable, the application fails closed; do not
+switch to the retained `.data` JSON files as a runtime fallback. Apply pending
+migrations with `npm run db:migrate` before restarting the application.
 
 ## Gate Review Email
 
@@ -34,7 +37,7 @@ To test delivery, submit a prepared Project or Package Gate with an Approver ema
 
 ## Identity Foundation
 
-Authentication uses Better Auth, a single-tenant Microsoft Entra workforce application, and PostgreSQL. Operational data uses the ignored `.data` directory by default; an explicitly selected PostgreSQL test mode is also available after migration and import.
+Authentication uses Better Auth, a single-tenant Microsoft Entra workforce application, and PostgreSQL. PostgreSQL is also the active operational backend. The ignored `.data` directory is retained as migration source and recovery evidence, not as a runtime backend.
 
 Create `.env.local` locally with restrictive permissions and edit it with your local editor. Do not send its contents through chat or commit it:
 
@@ -54,7 +57,7 @@ MICROSOFT_CLIENT_ID=
 MICROSOFT_CLIENT_SECRET=
 MICROSOFT_TENANT_ID=
 DATABASE_URL=
-OPERATIONAL_DATA_BACKEND=json
+OPERATIONAL_DATA_BACKEND=postgres
 
 APP_BASE_URL=http://localhost:3000
 RESEND_API_KEY=
@@ -87,7 +90,7 @@ UPDATE app_user SET status = 'disabled', updated_at = now() WHERE id = '<applica
 
 ## Operational PostgreSQL Foundation
 
-Operational persistence defaults to `.data/*.json` for local development. Migration and import commands do not switch the runtime backend automatically. JSON mode preserves the legacy local workflow but does not provide the PostgreSQL authorization, identity-bound approval, transaction, or audit guarantees and must not be treated as production-ready.
+Operational persistence uses PostgreSQL for local development. Migration and import commands do not switch the runtime backend automatically. The retained `.data/*.json` files are immutable migration and recovery inputs; they must not be used as a runtime fallback or written alongside PostgreSQL.
 
 Check migration status and apply pending migrations with a direct PostgreSQL connection when available. The migration runner uses `DATABASE_DIRECT_URL` first and falls back to `DATABASE_URL`:
 
@@ -123,13 +126,13 @@ npm run db:operational -- --validate --allow-runtime-projection --owner-map ./ow
 
 The importer rejects a database-name mismatch, a non-empty operational target, missing ownership, altered source data, and unapproved runtime normalization. Each run writes sanitized JSON and Markdown evidence to the ignored `.migration-reports/` directory.
 
-For isolated runtime verification against a migrated and imported database, set:
+For runtime access to the migrated and imported database, set:
 
 ```dotenv
 OPERATIONAL_DATA_BACKEND=postgres
 ```
 
-Only the exact values `json` and `postgres` are accepted. PostgreSQL mode fails closed when migration `007_project_authorization_audit.sql` is absent; it never falls back to JSON or performs dual writes. A production build fails unless `OPERATIONAL_DATA_BACKEND=postgres`, preventing accidental deployment with JSON operational persistence. This switch is for explicit verification and is not itself a production activation procedure.
+Only the exact values `json` and `postgres` are accepted by the backend policy, but this repository's active local workflow uses `postgres`. PostgreSQL mode fails closed when migration `007_project_authorization_audit.sql` is absent; it never falls back to JSON or performs dual writes. A production build fails unless `OPERATIONAL_DATA_BACKEND=postgres`, preventing accidental deployment with JSON operational persistence.
 
 ## Project authorization and Gate Reviews
 
