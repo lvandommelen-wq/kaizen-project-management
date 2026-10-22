@@ -21,6 +21,7 @@ import { getGateDeliverables } from "@/lib/deliverables";
 import { getPackage, packageStageLabels } from "@/lib/packages";
 import { getGateActions } from "@/lib/project-actions";
 import { getProject } from "@/lib/projects";
+import { getCurrentProjectRole } from "@/lib/authorization";
 
 export const dynamic = "force-dynamic";
 
@@ -31,6 +32,8 @@ export default async function PackageGatePage({
   const { projectId, packageId, gateId } = await params;
   const query = await searchParams;
   const resolvedGateId = decodeURIComponent(gateId);
+  const access = await getCurrentProjectRole(projectId);
+  if (!access) notFound();
   const project = await getProject(projectId);
 
   if (!project) {
@@ -55,6 +58,7 @@ export default async function PackageGatePage({
       contextLabel={`${projectPackage.packageCode} - ${projectPackage.packageName}`}
       actionRegisterHref={`/projects/${project.id}/actions?packageId=${encodeURIComponent(projectPackage.id)}`}
       approvalError={parseQueryValue(query.approvalError)}
+      canEdit={access.role !== "viewer"}
       invitationFailureCount={parsePositiveInteger(query.invitationFailures)}
       approvalResponseAction={respondToPackageGateReviewAction.bind(
         null,

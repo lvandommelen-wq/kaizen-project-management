@@ -25,6 +25,7 @@ import {
   type ProjectActionChange,
 } from "@/lib/project-actions";
 import { getProject, type GovernanceTier } from "@/lib/projects";
+import { getCurrentProjectRole } from "@/lib/authorization";
 
 export const dynamic = "force-dynamic";
 
@@ -41,6 +42,7 @@ export default async function ProjectActionsPage({
 }) {
   const { projectId } = await params;
   const query = await searchParams;
+  if (!await getCurrentProjectRole(projectId)) notFound();
   const project = await getProject(projectId);
   if (!project) notFound();
 

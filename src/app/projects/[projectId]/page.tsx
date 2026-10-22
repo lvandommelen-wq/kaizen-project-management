@@ -26,6 +26,8 @@ import {
   type GovernanceTier,
 } from "@/lib/projects";
 import { getProjectActionDeletionBlocker } from "@/lib/project-actions";
+import { getCurrentProjectRole } from "@/lib/authorization";
+import { getOperationalDataBackend } from "@/lib/operational/backend";
 
 export const dynamic = "force-dynamic";
 
@@ -42,6 +44,8 @@ export default async function ProjectDetailPage({
 }) {
   const { projectId } = await params;
   const query = await searchParams;
+  const access = await getCurrentProjectRole(projectId);
+  if (!access) notFound();
   const project = await getProject(projectId);
 
   if (!project) {
@@ -71,13 +75,25 @@ export default async function ProjectDetailPage({
           <Link href="/projects" className="button-secondary">
             Projects
           </Link>
-          <Link href={`/projects/${project.id}/edit`} className="button-secondary">
-            Edit project
-          </Link>
+          {access?.role !== "viewer" ? (
+            <Link href={`/projects/${project.id}/edit`} className="button-secondary">
+              Edit project
+            </Link>
+          ) : null}
           <Link href={`/projects/${project.id}/actions`} className="button-secondary">
             Actions
           </Link>
-          {!deletionBlocker ? (
+          {getOperationalDataBackend() === "postgres" ? (
+            <Link href={`/projects/${project.id}/history`} className="button-secondary">
+              History
+            </Link>
+          ) : null}
+          {getOperationalDataBackend() === "postgres" && access?.role === "owner" ? (
+            <Link href={`/projects/${project.id}/members`} className="button-secondary">
+              Members
+            </Link>
+          ) : null}
+          {access?.role === "owner" && !deletionBlocker ? (
             <DeleteConfirmation
               action={deleteAction}
               buttonLabel="Delete project"
@@ -106,7 +122,7 @@ export default async function ProjectDetailPage({
           <h2 className="text-lg font-semibold text-slate-950">Project lifecycle</h2>
           <div className="flex flex-wrap items-center gap-3">
             <span className="status-pill status-not_assessed">{projectStageLabels[project.currentStage]}</span>
-            {previousStage && returnAction ? (
+            {access?.role !== "viewer" && previousStage && returnAction ? (
               <form action={returnAction}>
                 <button type="submit" className="button-secondary">
                   Return to {projectStageLabels[previousStage]}

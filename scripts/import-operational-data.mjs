@@ -22,7 +22,7 @@ for (const file of [".env.local", ".env"]) {
 const startedAt = new Date().toISOString();
 const options = parseArguments(process.argv.slice(2));
 let report = {
-  migrationVersion: 6,
+  migrationVersion: 7,
   mode: options.mode,
   result: "fail",
   startedAt,

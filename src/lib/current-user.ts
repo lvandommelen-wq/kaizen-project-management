@@ -15,6 +15,8 @@ export type CurrentUser = {
   createdAt: Date;
   updatedAt: Date;
   lastAuthenticatedAt: Date | null;
+  providerTenantId: string;
+  providerObjectId: string;
 };
 
 type CurrentUserRow = {
@@ -28,6 +30,8 @@ type CurrentUserRow = {
   created_at: Date;
   updated_at: Date;
   last_authenticated_at: Date | null;
+  provider_tenant_id: string;
+  provider_object_id: string;
 };
 
 export async function getCurrentUser(requestHeaders: Headers): Promise<CurrentUser | null> {
@@ -35,23 +39,27 @@ export async function getCurrentUser(requestHeaders: Headers): Promise<CurrentUs
   if (!session?.user.id) return null;
 
   const result = await getIdentityPool().query<CurrentUserRow>(
-    `SELECT id,
-            display_name,
-            email,
-            normalized_email,
-            organization_id,
-            status,
-            access_class,
-            created_at,
-            updated_at,
-            last_authenticated_at
-     FROM app_user
-     WHERE id = $1
-     LIMIT 1`,
+    `SELECT app_user.id,
+            app_user.display_name,
+            app_user.email,
+            app_user.normalized_email,
+            app_user.organization_id,
+            app_user.status,
+            app_user.access_class,
+            app_user.created_at,
+            app_user.updated_at,
+             app_user.last_authenticated_at,
+             user_identity.provider_tenant_id,
+             user_identity.provider_object_id
+      FROM app_user
+      INNER JOIN user_identity
+        ON user_identity.user_id = app_user.id
+       AND user_identity.provider = 'microsoft'
+      WHERE app_user.id = $1`,
     [session.user.id],
   );
+  if (result.rows.length !== 1) return null;
   const row = result.rows[0];
-  if (!row) return null;
 
   return {
     id: row.id,
@@ -64,6 +72,8 @@ export async function getCurrentUser(requestHeaders: Headers): Promise<CurrentUs
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     lastAuthenticatedAt: row.last_authenticated_at,
+    providerTenantId: row.provider_tenant_id,
+    providerObjectId: row.provider_object_id,
   };
 }
 

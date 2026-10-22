@@ -3,6 +3,7 @@ import { getPackage } from "@/lib/packages";
 import { getProject } from "@/lib/projects";
 import { PackageForm } from "../../_components/package-form";
 import { updatePackageAction } from "../../actions";
+import { getCurrentProjectRole } from "@/lib/authorization";
 
 export const dynamic = "force-dynamic";
 
@@ -10,6 +11,8 @@ export default async function EditPackagePage({
   params,
 }: PageProps<"/projects/[projectId]/packages/[packageId]/edit">) {
   const { projectId, packageId } = await params;
+  const access = await getCurrentProjectRole(projectId);
+  if (!access || access.role === "viewer") notFound();
   const project = await getProject(projectId);
 
   if (!project) {

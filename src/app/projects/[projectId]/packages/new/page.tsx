@@ -2,11 +2,14 @@ import { notFound } from "next/navigation";
 import { getProject } from "@/lib/projects";
 import { PackageForm } from "../_components/package-form";
 import { createPackageAction } from "../actions";
+import { getCurrentProjectRole } from "@/lib/authorization";
 
 export const dynamic = "force-dynamic";
 
 export default async function NewPackagePage({ params }: PageProps<"/projects/[projectId]/packages/new">) {
   const { projectId } = await params;
+  const access = await getCurrentProjectRole(projectId);
+  if (!access || access.role === "viewer") notFound();
   const project = await getProject(projectId);
 
   if (!project) {

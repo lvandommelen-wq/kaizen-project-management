@@ -1,11 +1,13 @@
 import Link from "next/link";
+import { requireInternalUser } from "@/lib/authorization";
 import { ClickableTableRow } from "./_components/clickable-table-row";
 import { getProjects, getProjectStatus, projectStageLabels, projectStatusLabels } from "@/lib/projects";
 
 export const dynamic = "force-dynamic";
 
 export default async function ProjectsPage() {
-  const projects = await getProjects();
+  const user = await requireInternalUser();
+  const projects = await getProjects(user.id);
 
   return (
     <div className="space-y-8">

@@ -2,11 +2,14 @@ import { notFound } from "next/navigation";
 import { ProjectForm } from "../../_components/project-form";
 import { updateProjectAction } from "../../actions";
 import { getProject } from "@/lib/projects";
+import { getCurrentProjectRole } from "@/lib/authorization";
 
 export const dynamic = "force-dynamic";
 
 export default async function EditProjectPage({ params }: PageProps<"/projects/[projectId]/edit">) {
   const { projectId } = await params;
+  const access = await getCurrentProjectRole(projectId);
+  if (!access || access.role === "viewer") notFound();
   const project = await getProject(projectId);
 
   if (!project) {

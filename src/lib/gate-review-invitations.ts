@@ -15,6 +15,7 @@ import {
   claimProjectGateReviewInvitation,
   completeProjectGateReviewInvitation,
 } from "./projects";
+import { getOperationalDataBackend } from "./operational/backend";
 
 export type GateReviewInvitationDispatchSummary = {
   sent: number;
@@ -65,10 +66,12 @@ export async function dispatchProjectGateReviewInvitations(input: {
       result,
       claimToken,
     ),
-    (cycle) => buildReviewUrl(
-      `/projects/${encodeURIComponent(input.projectId)}/gates/${encodeURIComponent(input.gateId)}`,
-      cycle.id,
-    ),
+    (cycle) => getOperationalDataBackend() === "postgres"
+      ? buildAssignedReviewUrl(cycle.id)
+      : buildReviewUrl(
+          `/projects/${encodeURIComponent(input.projectId)}/gates/${encodeURIComponent(input.gateId)}`,
+          cycle.id,
+        ),
   );
 }
 
@@ -100,10 +103,12 @@ export async function dispatchPackageGateReviewInvitations(input: {
       result,
       claimToken,
     ),
-    (cycle) => buildReviewUrl(
-      `/projects/${encodeURIComponent(input.projectId)}/packages/${encodeURIComponent(input.packageId)}/gates/${encodeURIComponent(input.gateId)}`,
-      cycle.id,
-    ),
+    (cycle) => getOperationalDataBackend() === "postgres"
+      ? buildAssignedReviewUrl(cycle.id)
+      : buildReviewUrl(
+          `/projects/${encodeURIComponent(input.projectId)}/packages/${encodeURIComponent(input.packageId)}/gates/${encodeURIComponent(input.gateId)}`,
+          cycle.id,
+        ),
   );
 }
 
@@ -194,6 +199,10 @@ function buildReviewUrl(pathname: string, reviewCycleId: string) {
   url.searchParams.set("reviewCycle", reviewCycleId);
   url.hash = `review-cycle-${reviewCycleId}`;
   return url.toString();
+}
+
+function buildAssignedReviewUrl(reviewCycleId: string) {
+  return buildReviewUrl(`/reviews/${encodeURIComponent(reviewCycleId)}`, reviewCycleId);
 }
 
 function invitationPreparationFailure(

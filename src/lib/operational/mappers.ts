@@ -66,6 +66,7 @@ function json<T>(value: unknown): T {
 export async function loadProjects(
   client: PoolClient,
   includeArchived = false,
+  userId?: string,
 ): Promise<Project[]> {
   const result = await client.query(
     `SELECT project.*,
@@ -73,8 +74,13 @@ export async function loadProjects(
             project.planned_completion_date::text AS planned_completion_date
      FROM project
      WHERE ($1::boolean OR archived_at IS NULL)
+       AND ($2::uuid IS NULL OR EXISTS (
+         SELECT 1 FROM project_membership
+         WHERE project_membership.project_id = project.id
+           AND project_membership.user_id = $2
+       ))
      ORDER BY updated_at DESC, id`,
-    [includeArchived],
+    [includeArchived, userId ?? null],
   );
 
   const projects: Project[] = [];
@@ -303,6 +309,13 @@ async function loadGates(
           roleFunction: text(row.role_function),
           approvalRole: text(row.approval_role),
           approvalLevel: integer(row.approval_level),
+          ...(row.expected_provider_tenant_id == null
+            ? {}
+            : {
+                assignedUserId: nullableText(row.assigned_user_id),
+                expectedProviderTenantId: text(row.expected_provider_tenant_id),
+                expectedProviderObjectId: text(row.expected_provider_object_id),
+              }),
         })),
       reviewCycles: cycleRows
         .filter((row) => row.gate_id === id)
@@ -361,6 +374,13 @@ function mapReviewCycle(
         roleFunction: text(snapshot.role_function),
         approvalRole: text(snapshot.approval_role),
         approvalLevel: integer(snapshot.approval_level),
+        ...(snapshot.expected_provider_tenant_id == null
+          ? {}
+          : {
+              assignedUserId: nullableText(snapshot.assigned_user_id),
+              expectedProviderTenantId: text(snapshot.expected_provider_tenant_id),
+              expectedProviderObjectId: text(snapshot.expected_provider_object_id),
+            }),
         response: response
           ? {
               outcome: text(response.outcome),

@@ -29,6 +29,7 @@ import {
   projectActionStatusLabels,
   type ProjectAction,
 } from "@/lib/project-actions";
+import { getOperationalDataBackend } from "@/lib/operational/backend";
 
 type FormAction = (formData: FormData) => void | Promise<void>;
 type ItemAction = (itemId: string) => void | Promise<void>;
@@ -54,6 +55,7 @@ type GateDetailProps = {
   gateActions: ProjectAction[];
   gateActionPackageId: string | null;
   invitationFailureCount?: number;
+  canEdit: boolean;
   isCurrentGate: boolean;
   packages: { id: string; label: string }[];
   actionRegisterHref: string;
@@ -88,6 +90,7 @@ export function GateDetail({
   gateActions,
   gateActionPackageId,
   invitationFailureCount,
+  canEdit,
   isCurrentGate,
   packages,
   actionRegisterHref,
@@ -110,10 +113,21 @@ export function GateDetail({
   const awaitingApprovalState = awaitingReviewCycle
     ? getGateReviewApprovalState(awaitingReviewCycle)
     : null;
-  const canPrepare = isGateInPreparation(gate);
+  const canPrepare = canEdit && isGateInPreparation(gate);
   const canConfigureApprovers = canPrepare;
   const canAddGateAction = isCurrentGate && canPrepare;
   const submissionIssues = getGateSubmissionIssues(gate, deliverables, gateActions);
+  if (
+    getOperationalDataBackend() === "postgres" &&
+    gate.approvers.some(
+      (approver) => !approver.expectedProviderTenantId || !approver.expectedProviderObjectId,
+    )
+  ) {
+    submissionIssues.push({
+      code: "invalid_approver_identities",
+      message: "Every Gate Approver needs an authoritative Microsoft Entra Object ID before submission.",
+    });
+  }
   const canSubmit = isCurrentGate && canPrepare && submissionIssues.length === 0;
   const approversByLevel = groupApproversByLevel(gate.approvers);
   const approvalStatus = getApprovalStatus(gate);
@@ -218,6 +232,9 @@ export function GateDetail({
                         >
                           {approver.email}
                         </a>
+                        <p className="mt-2 font-mono text-xs text-slate-500">
+                          Entra Object ID: {approver.expectedProviderObjectId ?? "Not assigned"}
+                        </p>
                       </div>
 
                       {canConfigureApprovers ? (
@@ -273,7 +290,7 @@ export function GateDetail({
               {submittedCycleNumber === awaitingReviewCycle.cycleNumber ? " was" : " is"} submitted for approval.
               The Gate Status is Submitted for Approval, and the {scopeLabel} Stage remains {stageLabel}.
             </p>
-            {canWithdrawGateReviewCycle(awaitingReviewCycle) ? (
+            {canEdit && canWithdrawGateReviewCycle(awaitingReviewCycle) ? (
               <ConfirmationAction
                 action={withdrawSubmissionAction}
                 buttonLabel="Withdraw Submission"
@@ -292,6 +309,7 @@ export function GateDetail({
               </p>
             ) : null}
             {process.env.NODE_ENV === "development" &&
+            getOperationalDataBackend() === "json" &&
             awaitingApprovalState &&
             awaitingApprovalState.eligibleApprovers.length > 0 ? (
               <GateApprovalTestPanel
@@ -312,13 +330,13 @@ export function GateDetail({
               This Gate has a formal decision. Reopen it before making another decision. Reopening preserves
               Criteria, Deliverables, Actions, and the current lifecycle Stage.
             </p>
-            <ConfirmationAction
+            {canEdit ? <ConfirmationAction
               action={reopenAction}
               buttonLabel="Reopen Gate"
               confirmLabel="Reopen Gate"
               message="This resets the Gate decision to Not Submitted. It does not change the current Stage or remove existing Gate information."
               title="Reopen Gate"
-            />
+            /> : null}
           </div>
         ) : isCurrentGate && canPrepare ? (
           <div className="mt-5 space-y-5">
@@ -967,6 +985,16 @@ function ApproverForm({
           defaultValue={approver?.approvalLevel ?? 1}
           className="h-11 rounded-lg border border-slate-300 bg-white px-3 text-slate-950 shadow-sm outline-none focus:border-slate-900 focus:ring-2 focus:ring-slate-200"
         />
+      </label>
+      <label className="grid gap-2 text-sm font-medium text-slate-700 md:col-span-2">
+        Microsoft Entra Object ID
+        <input
+          name="providerObjectId"
+          defaultValue={approver?.expectedProviderObjectId ?? ""}
+          placeholder="00000000-0000-0000-0000-000000000000"
+          className="h-11 rounded-lg border border-slate-300 bg-white px-3 font-mono text-sm text-slate-950 shadow-sm outline-none focus:border-slate-900 focus:ring-2 focus:ring-slate-200"
+        />
+        <span className="font-normal text-slate-500">Required for PostgreSQL Gate submission. Use the B2B guest Object ID from this application&apos;s Entra tenant; email is delivery-only.</span>
       </label>
       <div className="flex items-end justify-end">
         <button type="submit" className="button-primary">{submitLabel}</button>

@@ -22,6 +22,7 @@ import {
   type GateCriterion,
   type GateCriterionInput,
   type GateReviewResponseInput,
+  type GateReviewActorSnapshot,
   type GateReviewResponseResult,
   type GateReviewInvitationAttemptResult,
   type GateSubmissionResult,
@@ -159,9 +160,9 @@ async function writeProjectsFile(projects: Project[]) {
   await writeFile(projectsFile, `${JSON.stringify(projects, null, 2)}\n`, "utf8");
 }
 
-export async function getProjects() {
+export async function getProjects(userId?: string) {
   if (getOperationalDataBackend() === "postgres") {
-    return postgresOperational.getProjects();
+    return postgresOperational.getProjects(userId);
   }
   const projects = await readProjectsFile();
 
@@ -186,9 +187,9 @@ export async function getProject(projectId: string) {
   return project;
 }
 
-export async function createProject(input: ProjectFormInput) {
+export async function createProject(input: ProjectFormInput, ownerUserId?: string) {
   if (getOperationalDataBackend() === "postgres") {
-    return postgresOperational.createProject(input);
+    return postgresOperational.createProject(input, ownerUserId);
   }
   return withGateWorkflowLock(async () => {
     const projects = await readProjectsFile();
@@ -448,9 +449,10 @@ function resequenceGovernanceTiers(tiers: GovernanceTier[]) {
 export async function submitProjectGateForApproval(
   projectId: string,
   gateId: string,
+  submittedBy?: GateReviewActorSnapshot,
 ): Promise<GateSubmissionResult<Project> | null> {
   if (getOperationalDataBackend() === "postgres") {
-    return postgresOperational.submitProjectGateForApproval(projectId, gateId);
+    return postgresOperational.submitProjectGateForApproval(projectId, gateId, submittedBy);
   }
   return withGateWorkflowLock(async () => {
     const projects = await readProjectsFile();

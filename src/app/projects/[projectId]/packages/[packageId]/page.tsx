@@ -11,6 +11,7 @@ import {
   packageStageLabels,
 } from "@/lib/packages";
 import { getProject } from "@/lib/projects";
+import { getCurrentProjectRole } from "@/lib/authorization";
 
 export const dynamic = "force-dynamic";
 
@@ -20,6 +21,7 @@ export default async function PackageDetailPage({
 }: PageProps<"/projects/[projectId]/packages/[packageId]">) {
   const { projectId, packageId } = await params;
   const query = await searchParams;
+  if (!await getCurrentProjectRole(projectId)) notFound();
   const project = await getProject(projectId);
 
   if (!project) {

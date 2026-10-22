@@ -30,6 +30,13 @@ const importerRole = process.env.OPERATIONAL_TEST_IMPORTER_ROLE?.trim();
 const configured = Boolean(
   databaseUrlA && databaseUrlB && databaseNameA && databaseNameB && importerRole,
 );
+const testTenantId = "10000000-0000-4000-8000-000000000001";
+const testOwnerUserId = "20000000-0000-4000-8000-000000000001";
+const testOwnerObjectId = "30000000-0000-4000-8000-000000000001";
+const testEditorUserId = "20000000-0000-4000-8000-000000000002";
+const testViewerUserId = "20000000-0000-4000-8000-000000000003";
+const testOutsiderUserId = "20000000-0000-4000-8000-000000000004";
+const testExternalUserId = "20000000-0000-4000-8000-000000000005";
 
 test("operational migrations and imports are transactional and repeatable", {
   skip: configured ? false : "Disposable PostgreSQL test databases are not provisioned.",
@@ -43,12 +50,17 @@ test("operational migrations and imports are transactional and repeatable", {
 
   const migrationsDirectory = path.join(process.cwd(), "database", "migrations");
   const silentLogger = { log() {} };
-  for (const connectionString of [databaseUrlA, databaseUrlB]) {
+  for (const [connectionString, databaseName] of [
+    [databaseUrlA, databaseNameA],
+    [databaseUrlB, databaseNameB],
+  ]) {
+    await clearExistingDisposableOperationalData(connectionString, databaseName);
     const first = await runMigrations({ connectionString, migrationsDirectory, logger: silentLogger });
     const second = await runMigrations({ connectionString, migrationsDirectory, logger: silentLogger });
     assert.ok(first.every((migration) => migration.state === "applied"));
     assert.ok(second.every((migration) => migration.state === "applied"));
     await grantImporterPrivileges(connectionString, importerRole);
+    await seedTestIdentity(connectionString);
   }
   await clearDisposableOperationalData(databaseUrlA, databaseNameA);
   await clearDisposableOperationalData(databaseUrlB, databaseNameB);
@@ -67,7 +79,12 @@ test("operational migrations and imports are transactional and repeatable", {
     allowRuntimeProjection: true,
   });
   const sourceControl = await getSourceControlState();
-  const rows = buildRelationalRows(source.data);
+  const ownerRows = source.data.projects.map((project) => ({
+    project_id: project.id,
+    user_id: testOwnerUserId,
+    role: "owner",
+  }));
+  const rows = buildRelationalRows(source.data, ownerRows);
   const fingerprint = logicalFingerprint(rows);
   const importRecord = {
     sourceCommit: sourceControl.commit,
@@ -165,6 +182,7 @@ test("operational migrations and imports are transactional and repeatable", {
 
 async function verifyRuntimePersistence(connectionString, source) {
   process.env.DATABASE_URL = connectionString;
+  process.env.MICROSOFT_TENANT_ID = testTenantId;
   registerHooks({
     resolve(specifier, context, nextResolve) {
       if (specifier === "server-only") {
@@ -222,9 +240,38 @@ async function verifyRuntimePersistence(connectionString, source) {
       plannedCompletionDate: "2026-12-15",
       validationRequired: false,
       currentStage: "initiation",
-    });
+    }, testOwnerUserId);
     assert.equal(project.plannedStartDate, "2026-01-15");
     assert.equal(project.plannedCompletionDate, "2026-12-15");
+    await assert.rejects(
+      () => runtime.deleteProjectMembership(project.id, testOwnerUserId),
+      /active Owner/,
+    );
+    assert.equal(
+      (await runtime.upsertProjectMembership(project.id, testEditorUserId, "editor"))?.role,
+      "editor",
+    );
+    assert.equal(
+      (await runtime.upsertProjectMembership(project.id, testViewerUserId, "viewer"))?.role,
+      "viewer",
+    );
+    assert.equal(
+      await runtime.upsertProjectMembership(project.id, testExternalUserId, "viewer"),
+      null,
+    );
+    assert.ok((await runtime.getProjects(testViewerUserId)).some((item) => item.id === project.id));
+    assert.equal(
+      (await runtime.getProjects(testOutsiderUserId)).some((item) => item.id === project.id),
+      false,
+    );
+    assert.equal(
+      (await runtime.upsertProjectMembership(project.id, testEditorUserId, "owner"))?.role,
+      "owner",
+    );
+    assert.equal(
+      (await runtime.upsertProjectMembership(project.id, testOwnerUserId, "editor"))?.role,
+      "editor",
+    );
 
     const updatedProject = await projectFacade.updateProject(project.id, {
       projectNumber: project.projectNumber,
@@ -554,6 +601,9 @@ async function verifyRuntimePersistence(connectionString, source) {
         roleFunction: "Project Sponsor",
         approvalRole: "Approver",
         approvalLevel: 1,
+        assignedUserId: null,
+        expectedProviderTenantId: testTenantId,
+        expectedProviderObjectId: testOwnerObjectId,
       },
     );
     assert.ok(approver);
@@ -568,6 +618,9 @@ async function verifyRuntimePersistence(connectionString, source) {
           roleFunction: approver.roleFunction,
           approvalRole: approver.approvalRole,
           approvalLevel: approver.approvalLevel,
+          assignedUserId: approver.assignedUserId,
+          expectedProviderTenantId: approver.expectedProviderTenantId,
+          expectedProviderObjectId: approver.expectedProviderObjectId,
         },
       ))?.name,
       "Updated Runtime Approver",
@@ -581,6 +634,9 @@ async function verifyRuntimePersistence(connectionString, source) {
         roleFunction: "Test",
         approvalRole: "Test",
         approvalLevel: 2,
+        assignedUserId: null,
+        expectedProviderTenantId: testTenantId,
+        expectedProviderObjectId: "30000000-0000-4000-8000-000000000002",
       },
     );
     assert.ok(temporaryApprover);
@@ -592,6 +648,21 @@ async function verifyRuntimePersistence(connectionString, source) {
       ),
       true,
     );
+    const secondApprover = await projectFacade.createProjectGateApprover(
+      project.id,
+      currentGate.id,
+      {
+        name: "Second Runtime Approver",
+        email: "second-runtime-approver@example.invalid",
+        roleFunction: "Project Board",
+        approvalRole: "Second Approver",
+        approvalLevel: 2,
+        assignedUserId: null,
+        expectedProviderTenantId: testTenantId,
+        expectedProviderObjectId: "30000000-0000-4000-8000-000000000002",
+      },
+    );
+    assert.ok(secondApprover);
 
     const submissions = await Promise.all([
       projectFacade.submitProjectGateForApproval(project.id, currentGate.id),
@@ -659,6 +730,8 @@ async function verifyRuntimePersistence(connectionString, source) {
         gateId: currentGate.id,
         reviewCycleId: cycle.id,
         actorUserId: "00000000-0000-4000-8000-000000000000",
+        actorProviderTenantId: testTenantId,
+        actorProviderObjectId: "30000000-0000-4000-8000-000000000099",
         outcome: "approved",
         comment: "Must fail closed.",
       }),
@@ -690,6 +763,76 @@ async function verifyRuntimePersistence(connectionString, source) {
     assert.equal(resubmission?.outcome, "submitted");
     assert.equal(resubmission.reviewCycle.cycleNumber, 2);
     assert.equal(resubmission.reviewCycle.previousCycleId, cycle.id);
+    const authenticatedActor = {
+      id: testOwnerUserId,
+      displayName: "Integration Test Owner",
+      email: "integration-owner@example.invalid",
+      normalizedEmail: "integration-owner@example.invalid",
+      organizationId: null,
+      status: "active",
+      accessClass: "internal",
+      createdAt: new Date(0),
+      updatedAt: new Date(0),
+      lastAuthenticatedAt: new Date(0),
+      providerTenantId: testTenantId,
+      providerObjectId: testOwnerObjectId,
+    };
+    const authenticatedEditorActor = {
+      ...authenticatedActor,
+      id: testEditorUserId,
+      displayName: "Integration Test Editor",
+      email: "integration-editor@example.invalid",
+      normalizedEmail: "integration-editor@example.invalid",
+      providerObjectId: "30000000-0000-4000-8000-000000000002",
+    };
+    const assignedReview = await runtime.getAssignedGateReview(
+      resubmission.reviewCycle.id,
+      authenticatedActor,
+    );
+    assert.equal(assignedReview?.assignedApprover.gateApproverId, approver.id);
+    assert.equal(
+      await runtime.getAssignedGateReview(resubmission.reviewCycle.id, {
+        ...authenticatedActor,
+        id: testExternalUserId,
+        accessClass: "external_reviewer",
+        providerObjectId: "30000000-0000-4000-8000-000000000005",
+      }),
+      null,
+    );
+    assert.equal(
+      (await runtime.recordAssignedGateReviewResponse({
+        reviewCycleId: resubmission.reviewCycle.id,
+        actor: authenticatedEditorActor,
+        outcome: "approved",
+        comment: "Must wait for the first Approval Level.",
+      }))?.outcome,
+      "not_eligible",
+    );
+    const authenticatedResponse = await runtime.recordAssignedGateReviewResponse({
+      reviewCycleId: resubmission.reviewCycle.id,
+      actor: authenticatedActor,
+      outcome: "approved",
+      comment: "Authenticated integration approval.",
+    });
+    assert.equal(authenticatedResponse?.outcome, "recorded");
+    assert.deepEqual(authenticatedResponse.activatedApproverIds, [secondApprover.id]);
+    assert.equal(
+      (await runtime.recordAssignedGateReviewResponse({
+        reviewCycleId: resubmission.reviewCycle.id,
+        actor: authenticatedEditorActor,
+        outcome: "approved",
+        comment: "Authenticated second-level approval.",
+      }))?.outcome,
+      "recorded",
+    );
+    const reviewAuditEvents = (await runtime.getProjectAuditEvents(project.id)).filter(
+      (event) => event.eventType === "gate_review.responded"
+        && event.resourceId === resubmission.reviewCycle.id,
+    );
+    assert.deepEqual(
+      reviewAuditEvents.map((event) => event.actorUserId).sort(),
+      [testEditorUserId, testOwnerUserId].sort(),
+    );
 
     const packageBeforeSubmission = await packageFacade.getPackage(
       project.id,
@@ -735,6 +878,9 @@ async function verifyRuntimePersistence(connectionString, source) {
         roleFunction: "Package Sponsor",
         approvalRole: "Approver",
         approvalLevel: 1,
+        assignedUserId: null,
+        expectedProviderTenantId: testTenantId,
+        expectedProviderObjectId: testOwnerObjectId,
       },
     );
     assert.ok(packageApprover);
@@ -887,6 +1033,30 @@ async function verifyRuntimePersistence(connectionString, source) {
   }
 }
 
+async function clearExistingDisposableOperationalData(connectionString, expectedDatabase) {
+  assert.match(expectedDatabase, /^kaizen_project_manager_migration_test_[ab]$/);
+  const client = new Client({ connectionString });
+  await client.connect();
+  try {
+    const database = await client.query("SELECT current_database() AS name");
+    assert.equal(database.rows[0]?.name, expectedDatabase);
+    const existing = await client.query(
+      `SELECT tablename
+       FROM pg_catalog.pg_tables
+       WHERE schemaname = 'public' AND tablename = ANY($1::text[])`,
+      [OPERATIONAL_TABLES],
+    );
+    const tables = existing.rows.map((row) => String(row.tablename));
+    if (tables.length > 0) {
+      await client.query(
+        `TRUNCATE TABLE ${tables.map((table) => `"${table}"`).join(", ")} RESTART IDENTITY CASCADE`,
+      );
+    }
+  } finally {
+    await client.end();
+  }
+}
+
 async function verifyAdvisoryLock(connectionString, migrationsDirectory, logger) {
   const client = new Client({ connectionString });
   await client.connect();
@@ -934,13 +1104,13 @@ async function verifyTransactionalMigration(connectionString, migrationsDirector
   try {
     await cp(migrationsDirectory, temporaryDirectory, { recursive: true });
     await writeFile(
-      path.join(temporaryDirectory, "007_transaction_rollback_test.sql"),
+      path.join(temporaryDirectory, "008_transaction_rollback_test.sql"),
       "CREATE TABLE migration_rollback_probe (id integer);\nSELECT * FROM missing_migration_relation;\n",
       "utf8",
     );
     await assert.rejects(
       () => runMigrations({ connectionString, migrationsDirectory: temporaryDirectory, logger }),
-      /Failed to apply 007_transaction_rollback_test.sql/,
+      /Failed to apply 008_transaction_rollback_test.sql/,
     );
     const client = new Client({ connectionString });
     await client.connect();
@@ -950,7 +1120,7 @@ async function verifyTransactionalMigration(connectionString, migrationsDirector
       );
       assert.equal(result.rows[0].relation, null);
       const ledger = await client.query(
-        "SELECT 1 FROM identity_schema_migration WHERE name = '007_transaction_rollback_test.sql'",
+        "SELECT 1 FROM identity_schema_migration WHERE name = '008_transaction_rollback_test.sql'",
       );
       assert.equal(ledger.rowCount, 0);
     } finally {
@@ -976,6 +1146,54 @@ async function grantImporterPrivileges(connectionString, role) {
   }
 }
 
+async function seedTestIdentity(connectionString) {
+  const client = new Client({ connectionString });
+  await client.connect();
+  try {
+    const users = [
+      [testOwnerUserId, testOwnerObjectId, "Owner", "internal"],
+      [testEditorUserId, "30000000-0000-4000-8000-000000000002", "Editor", "internal"],
+      [testViewerUserId, "30000000-0000-4000-8000-000000000003", "Viewer", "internal"],
+      [testOutsiderUserId, "30000000-0000-4000-8000-000000000004", "Outsider", "internal"],
+      [testExternalUserId, "30000000-0000-4000-8000-000000000005", "External", "external_reviewer"],
+    ];
+    for (const [index, [userId, objectId, label, accessClass]] of users.entries()) {
+      const email = `integration-${label.toLowerCase()}@example.invalid`;
+      await client.query(
+        `INSERT INTO app_user (
+           id, display_name, email, normalized_email, email_verified,
+           status, access_class, created_at, updated_at
+         ) VALUES ($1, $2, $3, $3, true, 'active', $4, now(), now())
+         ON CONFLICT (id) DO UPDATE SET
+           status = 'active', access_class = EXCLUDED.access_class, updated_at = now()`,
+        [userId, `Integration Test ${label}`, email, accessClass],
+      );
+      await client.query(
+        `INSERT INTO user_identity (
+           id, provider, provider_object_id, user_id, provider_tenant_id,
+           provider_subject, provider_email_snapshot, entra_account_type,
+           last_authenticated_at, created_at, updated_at
+         ) VALUES ($1, 'microsoft', $2, $3, $4, $5, $6, $7, now(), now(), now())
+         ON CONFLICT (provider, provider_object_id) DO UPDATE SET
+           provider_tenant_id = EXCLUDED.provider_tenant_id,
+           provider_subject = EXCLUDED.provider_subject,
+           last_authenticated_at = now(), updated_at = now()`,
+        [
+          `40000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+          objectId,
+          userId,
+          testTenantId,
+          `integration-test-subject-${index + 1}`,
+          email,
+          accessClass === "internal" ? 0 : 1,
+        ],
+      );
+    }
+  } finally {
+    await client.end();
+  }
+}
+
 async function clearDisposableOperationalData(connectionString, expectedDatabase) {
   assert.match(expectedDatabase, /^kaizen_project_manager_migration_test_[ab]$/);
   const client = new Client({ connectionString });
@@ -992,6 +1210,22 @@ async function clearDisposableOperationalData(connectionString, expectedDatabase
 }
 
 async function verifyDatabaseConstraints(connectionString) {
+  const client = new Client({ connectionString });
+  await client.connect();
+  try {
+    await client.query(
+      `INSERT INTO audit_event (
+         id, request_id, event_type, resource_type, resource_id,
+         change_summary, metadata
+       ) VALUES ($1, $2, 'integration.probe', 'test', 'probe', '{}'::jsonb, '{}'::jsonb)`,
+      [
+        "50000000-0000-4000-8000-000000000001",
+        "60000000-0000-4000-8000-000000000001",
+      ],
+    );
+  } finally {
+    await client.end();
+  }
   await expectDatabaseError(connectionString,
     "UPDATE project_action SET sequence = 5 WHERE sequence = 2",
     /unique|duplicate/i);
@@ -1010,6 +1244,12 @@ async function verifyDatabaseConstraints(connectionString) {
   await expectDatabaseError(connectionString,
     "DELETE FROM project_action_update WHERE action_id = (SELECT id FROM project_action ORDER BY sequence LIMIT 1)",
     /immutable/i);
+  await expectDatabaseError(connectionString,
+    "UPDATE audit_event SET event_type = 'changed' WHERE id = '50000000-0000-4000-8000-000000000001'",
+    /append-only/i);
+  await expectDatabaseError(connectionString,
+    "DELETE FROM audit_event WHERE id = '50000000-0000-4000-8000-000000000001'",
+    /append-only/i);
   await expectDatabaseError(
     connectionString,
     `INSERT INTO deliverable_criterion (deliverable_id, criterion_id, gate_id, sequence)

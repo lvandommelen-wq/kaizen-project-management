@@ -61,7 +61,7 @@ const TABLE_COLUMNS = {
 };
 
 const INSERT_ORDER = Object.keys(TABLE_COLUMNS);
-export const OPERATIONAL_TABLES = [...INSERT_ORDER, "operational_import"];
+export const OPERATIONAL_TABLES = [...INSERT_ORDER, "audit_event", "operational_import"];
 const JSON_COLUMNS = new Set([
   "project_action_update.changes",
   "gate_review_cycle.project_snapshot",
@@ -305,7 +305,7 @@ export async function importOperationalRows({
            started_at,
            completed_at,
            result
-         ) VALUES (5, $1, $2, $3, $4, $5, $6, $7, $8, 'pass')`,
+         ) VALUES (7, $1, $2, $3, $4, $5, $6, $7, $8, 'pass')`,
         [
           importRecord.sourceCommit,
           importRecord.sourceWorktreeDirty,
@@ -363,7 +363,7 @@ export async function validateImportedRows({
     const expectedFingerprint = logicalFingerprint(expectedRows);
     if (
       importRows.rowCount !== 1 ||
-      importRows.rows[0].migration_version !== 5 ||
+      importRows.rows[0].migration_version !== 7 ||
       importRows.rows[0].result !== "pass" ||
       importRows.rows[0].logical_fingerprint !== expectedFingerprint
     ) {
@@ -529,7 +529,7 @@ async function assertOperationalSchema(client) {
       WHERE name IN (
         '004_operational_data_foundation.sql',
         '005_protect_gate_review_attempt_history.sql',
-        '006_runtime_persistence_safety.sql'
+         '007_project_authorization_audit.sql'
       )`,
   );
   if (result.rowCount !== 3) {

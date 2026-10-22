@@ -154,9 +154,33 @@ test("migration files are ordered, named, and checksummed", async () => {
       "004_operational_data_foundation.sql",
       "005_protect_gate_review_attempt_history.sql",
       "006_runtime_persistence_safety.sql",
+      "007_project_authorization_audit.sql",
     ],
   );
   assert.ok(migrations.every((migration) => /^[0-9a-f]{64}$/.test(migration.checksum)));
+});
+
+test("project permission roles enforce the approved hierarchy", async () => {
+  const { projectRoleAllows } = await import("../src/lib/project-permissions.ts");
+  assert.equal(projectRoleAllows("owner", "owner"), true);
+  assert.equal(projectRoleAllows("owner", "editor"), true);
+  assert.equal(projectRoleAllows("editor", "editor"), true);
+  assert.equal(projectRoleAllows("editor", "owner"), false);
+  assert.equal(projectRoleAllows("viewer", "viewer"), true);
+  assert.equal(projectRoleAllows("viewer", "editor"), false);
+});
+
+test("JSON persistence is allowed in development and rejected in production", async () => {
+  const { resolveOperationalDataBackend } = await import(
+    "../src/lib/operational/backend-policy.ts"
+  );
+  assert.equal(resolveOperationalDataBackend(undefined, "development"), "json");
+  assert.equal(resolveOperationalDataBackend("json", "test"), "json");
+  assert.equal(resolveOperationalDataBackend("postgres", "production"), "postgres");
+  assert.throws(
+    () => resolveOperationalDataBackend("json", "production"),
+    /development-only/,
+  );
 });
 
 test("migration loading rejects duplicate numeric versions", async () => {

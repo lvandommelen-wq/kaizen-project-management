@@ -44,6 +44,8 @@ import type {
   Project,
   ProjectFormInput,
 } from "../projects";
+import type { CurrentUser } from "../current-user";
+import { insertAuditEvent } from "../audit";
 import {
   loadDeliverable,
   loadGate,
@@ -55,7 +57,10 @@ import {
   loadProjectActions,
   loadProjects,
 } from "./mappers";
-import { withOperationalTransaction } from "./transaction";
+import {
+  getOperationalTransactionClient,
+  withOperationalTransaction,
+} from "./transaction";
 
 type Scope = {
   projectId: string;
@@ -78,6 +83,25 @@ export type ProjectMembership = {
   updatedAt: string;
 };
 
+export type ProjectMembershipDetail = ProjectMembership & {
+  displayName: string;
+  email: string;
+  status: string;
+  accessClass: string;
+};
+
+export type AuditEvent = {
+  id: string;
+  occurredAt: string;
+  actorUserId: string | null;
+  actorDisplayName: string | null;
+  eventType: string;
+  resourceType: string;
+  resourceId: string;
+  changeSummary: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+};
+
 const projectStageOrder = [
   "initiation",
   "definition_design",
@@ -97,6 +121,9 @@ const invitationLeaseMs = 5 * 60 * 1_000;
 async function withOperationalClient<T>(
   operation: (client: PoolClient) => Promise<T>,
 ): Promise<T> {
+  const transactionClient = getOperationalTransactionClient();
+  if (transactionClient) return operation(transactionClient);
+
   let client: PoolClient;
   try {
     client = await getOperationalPool().connect();
@@ -106,10 +133,10 @@ async function withOperationalClient<T>(
   try {
     const schema = await client.query(
       `SELECT 1 FROM identity_schema_migration
-       WHERE name = '006_runtime_persistence_safety.sql'`,
+       WHERE name = '007_project_authorization_audit.sql'`,
     );
     if (schema.rowCount !== 1) {
-      throw new Error("Operational PostgreSQL migration 006 has not been applied.");
+      throw new Error("Operational PostgreSQL migration 007 has not been applied.");
     }
     return await operation(client);
   } finally {
@@ -163,8 +190,8 @@ function packageStageLabel(stageId: string) {
   }[stageId] ?? stageId;
 }
 
-export async function getProjects() {
-  return withOperationalClient((client) => loadProjects(client));
+export async function getProjects(userId?: string) {
+  return withOperationalClient((client) => loadProjects(client, false, userId));
 }
 
 export async function getProject(projectId: string) {
@@ -175,7 +202,7 @@ export async function getArchivedProject(projectId: string) {
   return withOperationalClient((client) => loadProject(client, projectId, true));
 }
 
-export async function createProject(input: ProjectFormInput) {
+export async function createProject(input: ProjectFormInput, ownerUserId?: string) {
   return withOperationalTransaction(async (client) => {
     const id = randomUUID();
     const now = new Date().toISOString();
@@ -205,6 +232,13 @@ export async function createProject(input: ProjectFormInput) {
       "INSERT INTO project_action_sequence (project_id, next_sequence) VALUES ($1, 1)",
       [id],
     );
+    if (ownerUserId) {
+      await client.query(
+        `INSERT INTO project_membership (project_id, user_id, role, created_at, updated_at)
+         VALUES ($1, $2, 'owner', $3, $3)`,
+        [id, ownerUserId, now],
+      );
+    }
     const templates = getProjectGateTemplates(input.validationRequired);
     await insertGatesAndDefaultDeliverables(
       client,
@@ -1034,12 +1068,31 @@ async function createGateApprover(
        FROM gate_approver WHERE gate_id = $1`,
       [gateId],
     );
-    const approver = { id: randomUUID(), ...input };
+    const expectedProviderTenantId = input.expectedProviderObjectId
+      ? process.env.MICROSOFT_TENANT_ID?.trim().toLowerCase() ?? null
+      : null;
+    if (input.expectedProviderObjectId && !expectedProviderTenantId) {
+      throw new Error("MICROSOFT_TENANT_ID is required for Gate Approver assignment.");
+    }
+    const assignedUserId = expectedProviderTenantId && input.expectedProviderObjectId
+      ? await resolveApproverUserId(
+          client,
+          expectedProviderTenantId,
+          input.expectedProviderObjectId,
+        )
+      : null;
+    const approver = {
+      id: randomUUID(),
+      ...input,
+      assignedUserId,
+      expectedProviderTenantId,
+    };
     await client.query(
       `INSERT INTO gate_approver (
          id, gate_id, sequence, name, email, role_function, approval_role,
-         approval_level
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+         approval_level, assigned_user_id, expected_provider_tenant_id,
+         expected_provider_object_id
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
       [
         approver.id,
         gateId,
@@ -1049,6 +1102,9 @@ async function createGateApprover(
         approver.roleFunction,
         approver.approvalRole,
         approver.approvalLevel,
+        approver.assignedUserId,
+        approver.expectedProviderTenantId,
+        approver.expectedProviderObjectId,
       ],
     );
     await touchScope(client, scope, new Date().toISOString());
@@ -1065,9 +1121,23 @@ async function updateGateApprover(
   return withOperationalTransaction(async (client) => {
     const gate = await lockScopeGate(client, scope, gateId);
     if (!gate || !isGateInPreparation(gate)) return null;
+    const expectedProviderTenantId = input.expectedProviderObjectId
+      ? process.env.MICROSOFT_TENANT_ID?.trim().toLowerCase() ?? null
+      : null;
+    if (input.expectedProviderObjectId && !expectedProviderTenantId) {
+      throw new Error("MICROSOFT_TENANT_ID is required for Gate Approver assignment.");
+    }
+    const assignedUserId = expectedProviderTenantId && input.expectedProviderObjectId
+      ? await resolveApproverUserId(
+          client,
+          expectedProviderTenantId,
+          input.expectedProviderObjectId,
+        )
+      : null;
     const result = await client.query(
       `UPDATE gate_approver SET name = $3, email = $4, role_function = $5,
-         approval_role = $6, approval_level = $7
+          approval_role = $6, approval_level = $7, assigned_user_id = $8,
+          expected_provider_tenant_id = $9, expected_provider_object_id = $10
        WHERE gate_id = $1 AND id = $2`,
       [
         gateId,
@@ -1077,12 +1147,38 @@ async function updateGateApprover(
         input.roleFunction,
         input.approvalRole,
         input.approvalLevel,
+        assignedUserId,
+        expectedProviderTenantId,
+        input.expectedProviderObjectId,
       ],
     );
     if (result.rowCount === 0) return null;
     await touchScope(client, scope, new Date().toISOString());
-    return { id: approverId, ...input };
+    return {
+      id: approverId,
+      ...input,
+      assignedUserId,
+      expectedProviderTenantId,
+    };
   });
+}
+
+async function resolveApproverUserId(
+  client: PoolClient,
+  providerTenantId: string,
+  providerObjectId: string,
+) {
+  const result = await client.query(
+    `SELECT app_user.id
+     FROM app_user
+     JOIN user_identity ON user_identity.user_id = app_user.id
+     WHERE app_user.status = 'active'
+       AND user_identity.provider = 'microsoft'
+       AND user_identity.provider_tenant_id = $1
+       AND user_identity.provider_object_id = $2`,
+    [providerTenantId, providerObjectId],
+  );
+  return result.rows[0]?.id == null ? null : String(result.rows[0].id);
 }
 
 async function deleteGateApprover(
@@ -1968,6 +2064,7 @@ async function submitSpecificGateForApproval(
   client: PoolClient,
   scope: Scope,
   gateId: string,
+  submittedBy?: GateReviewActorSnapshot,
 ): Promise<GateSubmissionResult<Project | ProjectPackage> | null> {
   let gate = await lockScopeGate(client, scope, gateId);
   if (!gate) return null;
@@ -2002,13 +2099,22 @@ async function submitSpecificGateForApproval(
     (action) => action.source === "gate" && action.gateId === gateId,
   );
   const issues = getGateSubmissionIssues(gate, deliverables, gateActions);
+  const unassignedApprovers = gate.approvers.filter(
+    (approver) => !approver.expectedProviderTenantId || !approver.expectedProviderObjectId,
+  );
+  if (unassignedApprovers.length > 0) {
+    issues.push({
+      code: "invalid_approver_identities",
+      message: `${unassignedApprovers.length} Gate Approver${unassignedApprovers.length === 1 ? " needs" : "s need"} an authoritative Microsoft Entra Object ID.`,
+    });
+  }
   if (issues.length > 0) return { outcome: "blocked", issues };
 
   const now = new Date().toISOString();
   const reviewCycle = createGateReviewCycle({
     id: randomUUID(),
     submittedAt: now,
-    submittedBy: {
+    submittedBy: submittedBy ?? {
       userId: null,
       displayName: project.projectManager,
       email: null,
@@ -2091,11 +2197,12 @@ async function insertReviewCycle(
   );
   for (const [index, approver] of cycle.approvers.entries()) {
     await client.query(
-      `INSERT INTO gate_review_cycle_approver (
-         review_cycle_id, gate_approver_id, sequence, name, email,
-         role_function, approval_role, approval_level, assigned_user_id,
-         invitation_activated_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, $9)`,
+       `INSERT INTO gate_review_cycle_approver (
+          review_cycle_id, gate_approver_id, sequence, name, email,
+          role_function, approval_role, approval_level, assigned_user_id,
+          invitation_activated_at, expected_provider_tenant_id,
+          expected_provider_object_id
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
       [
         cycle.id,
         approver.gateApproverId,
@@ -2105,7 +2212,10 @@ async function insertReviewCycle(
         approver.roleFunction,
         approver.approvalRole,
         approver.approvalLevel,
+        approver.assignedUserId,
         approver.invitation?.activatedAt ?? null,
+        approver.expectedProviderTenantId,
+        approver.expectedProviderObjectId,
       ],
     );
   }
@@ -2114,12 +2224,14 @@ async function insertReviewCycle(
 export async function submitProjectGateForApproval(
   projectId: string,
   gateId: string,
+  submittedBy?: GateReviewActorSnapshot,
 ): Promise<GateSubmissionResult<Project> | null> {
   return withOperationalTransaction(async (client) => {
     const result = await submitSpecificGateForApproval(
       client,
       { projectId, packageId: null },
       gateId,
+      submittedBy,
     );
     return result as GateSubmissionResult<Project> | null;
   });
@@ -2129,12 +2241,14 @@ export async function submitPackageGateForApproval(
   projectId: string,
   packageId: string,
   gateId: string,
+  submittedBy?: GateReviewActorSnapshot,
 ): Promise<GateSubmissionResult<ProjectPackage> | null> {
   return withOperationalTransaction(async (client) => {
     const result = await submitSpecificGateForApproval(
       client,
       { projectId, packageId },
       gateId,
+      submittedBy,
     );
     return result as GateSubmissionResult<ProjectPackage> | null;
   });
@@ -2668,6 +2782,8 @@ export async function internalRecordIdentityBoundGateReviewResponse(input: {
   gateId: string;
   reviewCycleId: string;
   actorUserId: string;
+  actorProviderTenantId: string;
+  actorProviderObjectId: string;
   outcome: GateReviewResponseInput["outcome"];
   comment: string;
 }): Promise<GateReviewResponseResult<Project | ProjectPackage> | null> {
@@ -2704,8 +2820,15 @@ export async function internalRecordIdentityBoundGateReviewResponse(input: {
     const assignments = await client.query(
       `SELECT gate_approver_id FROM gate_review_cycle_approver
        WHERE review_cycle_id = $1 AND assigned_user_id = $2
+         AND expected_provider_tenant_id = $3
+         AND expected_provider_object_id = $4
        ORDER BY sequence, gate_approver_id FOR UPDATE`,
-      [input.reviewCycleId, input.actorUserId],
+      [
+        input.reviewCycleId,
+        input.actorUserId,
+        input.actorProviderTenantId,
+        input.actorProviderObjectId,
+      ],
     );
     const assignedApprovers = assignments.rows.flatMap((row) => {
       const id = String(row.gate_approver_id);
@@ -2727,9 +2850,18 @@ export async function internalRecordIdentityBoundGateReviewResponse(input: {
     }
     const gateApproverId = eligibleAssignedApprover.gateApproverId;
     const actorResult = await client.query(
-      `SELECT id, display_name, email FROM app_user
-       WHERE id = $1 AND status = 'active'`,
-      [input.actorUserId],
+      `SELECT app_user.id, app_user.display_name, app_user.email
+       FROM app_user
+       JOIN user_identity ON user_identity.user_id = app_user.id
+       WHERE app_user.id = $1 AND app_user.status = 'active'
+         AND user_identity.provider = 'microsoft'
+         AND user_identity.provider_tenant_id = $2
+         AND user_identity.provider_object_id = $3`,
+      [
+        input.actorUserId,
+        input.actorProviderTenantId,
+        input.actorProviderObjectId,
+      ],
     );
     if (actorResult.rowCount === 0) return { outcome: "approver_not_found" };
     const now = new Date().toISOString();
@@ -2748,6 +2880,8 @@ export async function internalRecordIdentityBoundGateReviewResponse(input: {
       userId: input.actorUserId,
       displayName: String(actorResult.rows[0].display_name),
       email: String(actorResult.rows[0].email),
+      providerTenantId: input.actorProviderTenantId,
+      providerObjectId: input.actorProviderObjectId,
     };
     const respondingApprover = transition.reviewCycle.approvers.find(
       (candidate) => candidate.gateApproverId === gateApproverId,
@@ -2766,10 +2900,11 @@ export async function internalRecordIdentityBoundGateReviewResponse(input: {
       if (protection.outcome !== "protected") return protection;
     }
     await client.query(
-      `INSERT INTO gate_review_response (
-         review_cycle_id, gate_approver_id, outcome, responded_at,
-         responded_by, responded_by_user_id, comment
-       ) VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)`,
+       `INSERT INTO gate_review_response (
+          review_cycle_id, gate_approver_id, outcome, responded_at,
+          responded_by, responded_by_user_id, comment,
+          responder_provider_tenant_id, responder_provider_object_id
+        ) VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9)`,
       [
         input.reviewCycleId,
         gateApproverId,
@@ -2778,6 +2913,8 @@ export async function internalRecordIdentityBoundGateReviewResponse(input: {
         JSON.stringify(actor),
         input.actorUserId,
         respondingApprover.response.comment,
+        input.actorProviderTenantId,
+        input.actorProviderObjectId,
       ],
     );
     await client.query(
@@ -2854,6 +2991,108 @@ export async function internalRecordIdentityBoundGateReviewResponse(input: {
       completion: transition.completion,
       activatedApproverIds: transition.activatedApproverIds,
     };
+  });
+}
+
+export type AssignedGateReview = {
+  projectId: string;
+  packageId: string | null;
+  gateId: string;
+  reviewCycle: Gate["reviewCycles"][number];
+  assignedApprover: Gate["reviewCycles"][number]["approvers"][number];
+};
+
+export async function getAssignedGateReview(
+  reviewCycleId: string,
+  actor: CurrentUser,
+): Promise<AssignedGateReview | null> {
+  return withOperationalTransaction(async (client) => {
+    const assignment = await client.query(
+      `SELECT gate.project_id, gate.package_id, cycle.gate_id, cycle.status,
+              approver.gate_approver_id, approver.assigned_user_id
+       FROM gate_review_cycle_approver AS approver
+       JOIN gate_review_cycle AS cycle ON cycle.id = approver.review_cycle_id
+       JOIN gate ON gate.id = cycle.gate_id
+       WHERE approver.review_cycle_id = $1
+         AND approver.expected_provider_tenant_id = $2
+         AND approver.expected_provider_object_id = $3
+       FOR UPDATE OF approver`,
+      [reviewCycleId, actor.providerTenantId, actor.providerObjectId],
+    );
+    if (assignment.rowCount !== 1) return null;
+    const row = assignment.rows[0];
+    if (row.assigned_user_id == null) {
+      if (row.status !== "awaiting_approval") return null;
+      const claimed = await client.query(
+        `UPDATE gate_review_cycle_approver
+         SET assigned_user_id = $2
+         WHERE review_cycle_id = $1
+           AND gate_approver_id = $3
+           AND assigned_user_id IS NULL`,
+        [reviewCycleId, actor.id, row.gate_approver_id],
+      );
+      if (claimed.rowCount !== 1) return null;
+      await insertAuditEvent(client, actor, String(row.project_id), {
+        eventType: "gate_review.assignment_claimed",
+        resourceType: "gate_review_cycle",
+        resourceId: reviewCycleId,
+        metadata: {
+          gateId: String(row.gate_id),
+          packageId: row.package_id == null ? null : String(row.package_id),
+          gateApproverId: String(row.gate_approver_id),
+        },
+      });
+    } else if (String(row.assigned_user_id) !== actor.id) {
+      return null;
+    }
+
+    const projectId = String(row.project_id);
+    const packageId = row.package_id == null ? null : String(row.package_id);
+    const gateId = String(row.gate_id);
+    const gate = await loadGate(client, projectId, packageId, gateId);
+    const reviewCycle = gate?.reviewCycles.find((cycle) => cycle.id === reviewCycleId);
+    const assignedApprover = reviewCycle?.approvers.find(
+      (approver) => approver.gateApproverId === String(row.gate_approver_id),
+    );
+    if (!reviewCycle || !assignedApprover) return null;
+    return { projectId, packageId, gateId, reviewCycle, assignedApprover };
+  });
+}
+
+export async function recordAssignedGateReviewResponse(input: {
+  reviewCycleId: string;
+  actor: CurrentUser;
+  outcome: GateReviewResponseInput["outcome"];
+  comment: string;
+}) {
+  return withOperationalTransaction(async (client) => {
+    const assigned = await getAssignedGateReview(input.reviewCycleId, input.actor);
+    if (!assigned) return null;
+    const result = await internalRecordIdentityBoundGateReviewResponse({
+      projectId: assigned.projectId,
+      packageId: assigned.packageId,
+      gateId: assigned.gateId,
+      reviewCycleId: input.reviewCycleId,
+      actorUserId: input.actor.id,
+      actorProviderTenantId: input.actor.providerTenantId,
+      actorProviderObjectId: input.actor.providerObjectId,
+      outcome: input.outcome,
+      comment: input.comment,
+    });
+    if (result?.outcome === "recorded") {
+      await insertAuditEvent(client, input.actor, assigned.projectId, {
+        eventType: "gate_review.responded",
+        resourceType: "gate_review_cycle",
+        resourceId: input.reviewCycleId,
+        changeSummary: { outcome: input.outcome },
+        metadata: {
+          gateId: assigned.gateId,
+          packageId: assigned.packageId,
+          gateApproverId: assigned.assignedApprover.gateApproverId,
+        },
+      });
+    }
+    return result == null ? null : { ...result, assigned };
   });
 }
 
@@ -2995,6 +3234,81 @@ export async function getProjectMemberships(
   });
 }
 
+export async function getProjectMembershipDetails(projectId: string) {
+  return withOperationalClient(async (client) => {
+    const result = await client.query(
+      `SELECT membership.*, app_user.display_name, app_user.email,
+              app_user.status, app_user.access_class
+       FROM project_membership AS membership
+       JOIN project ON project.id = membership.project_id
+       JOIN app_user ON app_user.id = membership.user_id
+       WHERE membership.project_id = $1
+         AND project.archived_at IS NULL
+       ORDER BY CASE membership.role
+         WHEN 'owner' THEN 1 WHEN 'editor' THEN 2 ELSE 3 END,
+         app_user.display_name, membership.user_id`,
+      [projectId],
+    );
+    return result.rows.map((row): ProjectMembershipDetail => ({
+      ...mapMembership(row),
+      displayName: String(row.display_name),
+      email: String(row.email),
+      status: String(row.status),
+      accessClass: String(row.access_class),
+    }));
+  });
+}
+
+export async function getAssignableProjectUsers(projectId: string) {
+  return withOperationalClient(async (client) => {
+    const result = await client.query(
+      `SELECT app_user.id, app_user.display_name, app_user.email
+       FROM app_user
+       WHERE app_user.status = 'active'
+         AND app_user.access_class = 'internal'
+         AND NOT EXISTS (
+           SELECT 1 FROM project_membership
+           WHERE project_membership.project_id = $1
+             AND project_membership.user_id = app_user.id
+         )
+       ORDER BY app_user.display_name, app_user.id`,
+      [projectId],
+    );
+    return result.rows.map((row) => ({
+      id: String(row.id),
+      displayName: String(row.display_name),
+      email: String(row.email),
+    }));
+  });
+}
+
+export async function getProjectAuditEvents(projectId: string, limit = 100) {
+  return withOperationalClient(async (client) => {
+    const result = await client.query(
+      `SELECT audit_event.*, app_user.display_name AS actor_display_name
+       FROM audit_event
+       LEFT JOIN app_user ON app_user.id = audit_event.actor_user_id
+       WHERE audit_event.project_id = $1
+       ORDER BY audit_event.occurred_at DESC, audit_event.id DESC
+       LIMIT $2`,
+      [projectId, limit],
+    );
+    return result.rows.map((row): AuditEvent => ({
+      id: String(row.id),
+      occurredAt: timestamp(row.occurred_at),
+      actorUserId: row.actor_user_id == null ? null : String(row.actor_user_id),
+      actorDisplayName: row.actor_display_name == null
+        ? null
+        : String(row.actor_display_name),
+      eventType: String(row.event_type),
+      resourceType: String(row.resource_type),
+      resourceId: String(row.resource_id),
+      changeSummary: row.change_summary as Record<string, unknown>,
+      metadata: row.metadata as Record<string, unknown>,
+    }));
+  });
+}
+
 export async function getUserProjectMemberships(
   userId: string,
   includeArchivedProjects = false,
@@ -3037,7 +3351,8 @@ export async function upsertProjectMembership(
     );
     if (project.rowCount === 0) return null;
     const user = await client.query(
-      "SELECT id FROM app_user WHERE id = $1 AND status = 'active'",
+      `SELECT id FROM app_user
+       WHERE id = $1 AND status = 'active' AND access_class = 'internal'`,
       [userId],
     );
     if (user.rowCount === 0) return null;

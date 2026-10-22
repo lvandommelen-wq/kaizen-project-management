@@ -85,7 +85,7 @@ UPDATE app_user SET status = 'disabled', updated_at = now() WHERE id = '<applica
 
 ## Operational PostgreSQL Foundation
 
-Operational persistence defaults to `.data/*.json`. Migration and import commands do not switch the runtime backend automatically.
+Operational persistence defaults to `.data/*.json` for local development. Migration and import commands do not switch the runtime backend automatically. JSON mode preserves the legacy local workflow but does not provide the PostgreSQL authorization, identity-bound approval, transaction, or audit guarantees and must not be treated as production-ready.
 
 Check migration status and apply pending migrations with a direct PostgreSQL connection when available. The migration runner uses `DATABASE_DIRECT_URL` first and falls back to `DATABASE_URL`:
 
@@ -127,7 +127,15 @@ For isolated runtime verification against a migrated and imported database, set:
 OPERATIONAL_DATA_BACKEND=postgres
 ```
 
-Only the exact values `json` and `postgres` are accepted. PostgreSQL mode fails closed when migration `006_runtime_persistence_safety.sql` is absent; it never falls back to JSON or performs dual writes. Public Gate Review responses remain disabled in PostgreSQL mode until authenticated Approver assignment and project-level authorization are integrated. This switch is for explicit verification and is not a production activation procedure.
+Only the exact values `json` and `postgres` are accepted. PostgreSQL mode fails closed when migration `007_project_authorization_audit.sql` is absent; it never falls back to JSON or performs dual writes. A production build fails unless `OPERATIONAL_DATA_BACKEND=postgres`, preventing accidental deployment with JSON operational persistence. This switch is for explicit verification and is not itself a production activation procedure.
+
+## Project authorization and Gate Reviews
+
+In PostgreSQL mode, every Project requires at least one active internal Owner. The creator becomes the first Owner atomically. Owners manage membership and Project deletion, Editors manage operational data and Gate workflows, and Viewers have read-only access. Package authorization is inherited from the parent Project.
+
+External Gate Approvers use Microsoft Entra B2B guest accounts. Invite and assign the guest to the enterprise application in Entra, then enter the guest's resource-tenant Object ID in the controlled Gate Approver configuration. The invitation email is delivery-only: `/reviews/<review-cycle-id>` requires authentication and an exact tenant ID plus object ID match against the frozen Approver assignment.
+
+PostgreSQL mutations create append-only audit events in the same transaction. Project members can inspect the latest events from the Project History page. Existing immutable Gate responses and invitation attempts remain the detailed governance evidence for those workflows.
 
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 

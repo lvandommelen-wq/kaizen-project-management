@@ -3,6 +3,10 @@
 import { revalidatePath } from "next/cache";
 import { notFound, redirect } from "next/navigation";
 import {
+  requireProjectRole,
+  withAuthorizedProjectMutation,
+} from "@/lib/authorization";
+import {
   createDeliverable,
   deleteDeliverable,
   parseDeliverableFormData,
@@ -52,9 +56,28 @@ import {
   updateProjectGateCriterion,
   withdrawProjectGateSubmission,
 } from "@/lib/projects";
+import { getOperationalDataBackend } from "@/lib/operational/backend";
 
 export async function submitProjectGateForApprovalAction(projectId: string, gateId: string) {
-  const result = await submitProjectGateForApproval(projectId, gateId);
+  const result = await withAuthorizedProjectMutation({
+    projectId,
+    minimumRole: "editor",
+    audit: {
+      eventType: "gate.submitted",
+      resourceType: "gate",
+      resourceId: gateId,
+    },
+    isSuccess: (
+      candidate: Awaited<ReturnType<typeof submitProjectGateForApproval>>,
+    ) => candidate?.outcome === "submitted",
+    operation: (actor) => submitProjectGateForApproval(projectId, gateId, {
+      userId: actor.id,
+      displayName: actor.displayName,
+      email: actor.email,
+      providerTenantId: actor.providerTenantId,
+      providerObjectId: actor.providerObjectId,
+    }),
+  });
 
   if (!result) {
     notFound();
@@ -86,7 +109,26 @@ export async function submitPackageGateForApprovalAction(
   packageId: string,
   gateId: string,
 ) {
-  const result = await submitPackageGateForApproval(projectId, packageId, gateId);
+  const result = await withAuthorizedProjectMutation({
+    projectId,
+    minimumRole: "editor",
+    audit: {
+      eventType: "gate.submitted",
+      resourceType: "gate",
+      resourceId: gateId,
+      metadata: { packageId },
+    },
+    isSuccess: (
+      candidate: Awaited<ReturnType<typeof submitPackageGateForApproval>>,
+    ) => candidate?.outcome === "submitted",
+    operation: (actor) => submitPackageGateForApproval(projectId, packageId, gateId, {
+      userId: actor.id,
+      displayName: actor.displayName,
+      email: actor.email,
+      providerTenantId: actor.providerTenantId,
+      providerObjectId: actor.providerObjectId,
+    }),
+  });
 
   if (!result) {
     notFound();
@@ -119,6 +161,10 @@ export async function respondToProjectGateReviewAction(
   gateId: string,
   formData: FormData,
 ) {
+  if (getOperationalDataBackend() === "postgres") {
+    throw new Error("Use the authenticated Review route to record this Gate response.");
+  }
+  await requireProjectRole(projectId, "editor");
   const result = await respondToProjectGateReview(
     projectId,
     gateId,
@@ -153,6 +199,10 @@ export async function respondToPackageGateReviewAction(
   gateId: string,
   formData: FormData,
 ) {
+  if (getOperationalDataBackend() === "postgres") {
+    throw new Error("Use the authenticated Review route to record this Gate response.");
+  }
+  await requireProjectRole(projectId, "editor");
   const result = await respondToPackageGateReview(
     projectId,
     packageId,
@@ -189,6 +239,7 @@ export async function retryProjectGateReviewInvitationAction(
   reviewCycleId: string,
   gateApproverId: string,
 ) {
+  await requireProjectRole(projectId, "editor");
   const invitationFailures = await dispatchProjectInvitationsSafely({
     projectId,
     gateId,
@@ -211,6 +262,7 @@ export async function retryPackageGateReviewInvitationAction(
   reviewCycleId: string,
   gateApproverId: string,
 ) {
+  await requireProjectRole(projectId, "editor");
   const invitationFailures = await dispatchPackageInvitationsSafely({
     projectId,
     packageId,
@@ -228,7 +280,13 @@ export async function retryPackageGateReviewInvitationAction(
 }
 
 export async function withdrawProjectGateSubmissionAction(projectId: string, gateId: string) {
-  const result = await withdrawProjectGateSubmission(projectId, gateId);
+  const result = await withAuthorizedProjectMutation({
+    projectId,
+    minimumRole: "editor",
+    audit: { eventType: "gate.withdrawn", resourceType: "gate", resourceId: gateId },
+    isSuccess: (candidate) => candidate?.outcome === "withdrawn",
+    operation: () => withdrawProjectGateSubmission(projectId, gateId),
+  });
 
   if (!result) {
     notFound();
@@ -247,7 +305,13 @@ export async function withdrawPackageGateSubmissionAction(
   packageId: string,
   gateId: string,
 ) {
-  const result = await withdrawPackageGateSubmission(projectId, packageId, gateId);
+  const result = await withAuthorizedProjectMutation({
+    projectId,
+    minimumRole: "editor",
+    audit: { eventType: "gate.withdrawn", resourceType: "gate", resourceId: gateId, metadata: { packageId } },
+    isSuccess: (candidate) => candidate?.outcome === "withdrawn",
+    operation: () => withdrawPackageGateSubmission(projectId, packageId, gateId),
+  });
 
   if (!result) {
     notFound();
@@ -262,7 +326,11 @@ export async function withdrawPackageGateSubmissionAction(
 }
 
 export async function createProjectGateActionAction(projectId: string, gateId: string, formData: FormData) {
-  await withGateWorkflowLock(async () => {
+  await withAuthorizedProjectMutation({
+    projectId,
+    minimumRole: "editor",
+    audit: (action) => ({ eventType: "action.created", resourceType: "action", resourceId: action.id, metadata: { gateId } }),
+    operation: () => withGateWorkflowLock(async () => {
     const project = await getProject(projectId);
     const gate = project?.gates.find((candidate) => candidate.id === gateId);
 
@@ -289,7 +357,7 @@ export async function createProjectGateActionAction(projectId: string, gateId: s
     }
 
     const parsed = parseGateActionFormData(formData);
-    await createGateProjectAction(
+    return createGateProjectAction(
       project.id,
       gate.id,
       packageIds,
@@ -297,6 +365,7 @@ export async function createProjectGateActionAction(projectId: string, gateId: s
       parsed.input,
       parsed.actor,
     );
+    }),
   });
   revalidateProjectGate(projectId, gateId);
   revalidatePath(`/projects/${projectId}/actions`);
@@ -309,7 +378,11 @@ export async function createPackageGateActionAction(
   gateId: string,
   formData: FormData,
 ) {
-  await withGateWorkflowLock(async () => {
+  await withAuthorizedProjectMutation({
+    projectId,
+    minimumRole: "editor",
+    audit: (action) => ({ eventType: "action.created", resourceType: "action", resourceId: action.id, metadata: { gateId, packageId } }),
+    operation: () => withGateWorkflowLock(async () => {
     const projectPackage = await getPackage(projectId, packageId);
     const gate = projectPackage?.gates.find((candidate) => candidate.id === gateId);
 
@@ -319,7 +392,7 @@ export async function createPackageGateActionAction(
     }
 
     const parsed = parseGateActionFormData(formData);
-    await createGateProjectAction(
+    return createGateProjectAction(
       projectId,
       gate.id,
       [projectPackage.id],
@@ -327,6 +400,7 @@ export async function createPackageGateActionAction(
       parsed.input,
       parsed.actor,
     );
+    }),
   });
   revalidatePackageGate(projectId, packageId, gateId);
   revalidatePath(`/projects/${projectId}/actions`);
@@ -334,7 +408,12 @@ export async function createPackageGateActionAction(
 }
 
 export async function reopenProjectGateAction(projectId: string, gateId: string) {
-  const project = await reopenProjectGate(projectId, gateId);
+  const project = await withAuthorizedProjectMutation({
+    projectId,
+    minimumRole: "editor",
+    audit: { eventType: "gate.reopened", resourceType: "gate", resourceId: gateId },
+    operation: () => reopenProjectGate(projectId, gateId),
+  });
 
   if (!project) {
     notFound();
@@ -345,7 +424,12 @@ export async function reopenProjectGateAction(projectId: string, gateId: string)
 }
 
 export async function reopenPackageGateAction(projectId: string, packageId: string, gateId: string) {
-  const projectPackage = await reopenPackageGate(projectId, packageId, gateId);
+  const projectPackage = await withAuthorizedProjectMutation({
+    projectId,
+    minimumRole: "editor",
+    audit: { eventType: "gate.reopened", resourceType: "gate", resourceId: gateId, metadata: { packageId } },
+    operation: () => reopenPackageGate(projectId, packageId, gateId),
+  });
 
   if (!projectPackage) {
     notFound();
@@ -356,11 +440,12 @@ export async function reopenPackageGateAction(projectId: string, packageId: stri
 }
 
 export async function createProjectGateApproverAction(projectId: string, gateId: string, formData: FormData) {
-  const approver = await createProjectGateApprover(
+  const approver = await withAuthorizedProjectMutation({
     projectId,
-    gateId,
-    parseGateApproverFormData(formData),
-  );
+    minimumRole: "editor",
+    audit: (created) => ({ eventType: "gate_approver.created", resourceType: "gate_approver", resourceId: created?.id ?? "unknown", metadata: { gateId } }),
+    operation: () => createProjectGateApprover(projectId, gateId, parseGateApproverFormData(formData)),
+  });
 
   if (!approver) {
     notFound();
@@ -376,12 +461,12 @@ export async function updateProjectGateApproverAction(
   approverId: string,
   formData: FormData,
 ) {
-  const approver = await updateProjectGateApprover(
+  const approver = await withAuthorizedProjectMutation({
     projectId,
-    gateId,
-    approverId,
-    parseGateApproverFormData(formData),
-  );
+    minimumRole: "editor",
+    audit: { eventType: "gate_approver.updated", resourceType: "gate_approver", resourceId: approverId, metadata: { gateId } },
+    operation: () => updateProjectGateApprover(projectId, gateId, approverId, parseGateApproverFormData(formData)),
+  });
 
   if (!approver) {
     notFound();
@@ -396,7 +481,12 @@ export async function deleteProjectGateApproverAction(
   gateId: string,
   approverId: string,
 ) {
-  const deleted = await deleteProjectGateApprover(projectId, gateId, approverId);
+  const deleted = await withAuthorizedProjectMutation({
+    projectId,
+    minimumRole: "editor",
+    audit: { eventType: "gate_approver.deleted", resourceType: "gate_approver", resourceId: approverId, metadata: { gateId } },
+    operation: () => deleteProjectGateApprover(projectId, gateId, approverId),
+  });
 
   if (!deleted) {
     notFound();
@@ -412,12 +502,12 @@ export async function createPackageGateApproverAction(
   gateId: string,
   formData: FormData,
 ) {
-  const approver = await createPackageGateApprover(
+  const approver = await withAuthorizedProjectMutation({
     projectId,
-    packageId,
-    gateId,
-    parseGateApproverFormData(formData),
-  );
+    minimumRole: "editor",
+    audit: (created) => ({ eventType: "gate_approver.created", resourceType: "gate_approver", resourceId: created?.id ?? "unknown", metadata: { gateId, packageId } }),
+    operation: () => createPackageGateApprover(projectId, packageId, gateId, parseGateApproverFormData(formData)),
+  });
 
   if (!approver) {
     notFound();
@@ -434,13 +524,12 @@ export async function updatePackageGateApproverAction(
   approverId: string,
   formData: FormData,
 ) {
-  const approver = await updatePackageGateApprover(
+  const approver = await withAuthorizedProjectMutation({
     projectId,
-    packageId,
-    gateId,
-    approverId,
-    parseGateApproverFormData(formData),
-  );
+    minimumRole: "editor",
+    audit: { eventType: "gate_approver.updated", resourceType: "gate_approver", resourceId: approverId, metadata: { gateId, packageId } },
+    operation: () => updatePackageGateApprover(projectId, packageId, gateId, approverId, parseGateApproverFormData(formData)),
+  });
 
   if (!approver) {
     notFound();
@@ -456,7 +545,12 @@ export async function deletePackageGateApproverAction(
   gateId: string,
   approverId: string,
 ) {
-  const deleted = await deletePackageGateApprover(projectId, packageId, gateId, approverId);
+  const deleted = await withAuthorizedProjectMutation({
+    projectId,
+    minimumRole: "editor",
+    audit: { eventType: "gate_approver.deleted", resourceType: "gate_approver", resourceId: approverId, metadata: { gateId, packageId } },
+    operation: () => deletePackageGateApprover(projectId, packageId, gateId, approverId),
+  });
 
   if (!deleted) {
     notFound();
@@ -467,7 +561,12 @@ export async function deletePackageGateApproverAction(
 }
 
 export async function createProjectGateCriterionAction(projectId: string, gateId: string, formData: FormData) {
-  const criterion = await createProjectGateCriterion(projectId, gateId, parseGateCriterionFormData(formData));
+  const criterion = await withAuthorizedProjectMutation({
+    projectId,
+    minimumRole: "editor",
+    audit: (created) => ({ eventType: "gate_criterion.created", resourceType: "gate_criterion", resourceId: created?.id ?? "unknown", metadata: { gateId } }),
+    operation: () => createProjectGateCriterion(projectId, gateId, parseGateCriterionFormData(formData)),
+  });
 
   if (!criterion) {
     notFound();
@@ -483,12 +582,12 @@ export async function updateProjectGateCriterionAction(
   criterionId: string,
   formData: FormData,
 ) {
-  const criterion = await updateProjectGateCriterion(
+  const criterion = await withAuthorizedProjectMutation({
     projectId,
-    gateId,
-    criterionId,
-    parseGateCriterionFormData(formData),
-  );
+    minimumRole: "editor",
+    audit: { eventType: "gate_criterion.updated", resourceType: "gate_criterion", resourceId: criterionId, metadata: { gateId } },
+    operation: () => updateProjectGateCriterion(projectId, gateId, criterionId, parseGateCriterionFormData(formData)),
+  });
 
   if (!criterion) {
     notFound();
@@ -503,7 +602,12 @@ export async function deleteProjectGateCriterionAction(
   gateId: string,
   criterionId: string,
 ) {
-  const deleted = await deleteProjectGateCriterion(projectId, gateId, criterionId);
+  const deleted = await withAuthorizedProjectMutation({
+    projectId,
+    minimumRole: "editor",
+    audit: { eventType: "gate_criterion.deleted", resourceType: "gate_criterion", resourceId: criterionId, metadata: { gateId } },
+    operation: () => deleteProjectGateCriterion(projectId, gateId, criterionId),
+  });
 
   if (!deleted) {
     notFound();
@@ -519,12 +623,12 @@ export async function createPackageGateCriterionAction(
   gateId: string,
   formData: FormData,
 ) {
-  const criterion = await createPackageGateCriterion(
+  const criterion = await withAuthorizedProjectMutation({
     projectId,
-    packageId,
-    gateId,
-    parseGateCriterionFormData(formData),
-  );
+    minimumRole: "editor",
+    audit: (created) => ({ eventType: "gate_criterion.created", resourceType: "gate_criterion", resourceId: created?.id ?? "unknown", metadata: { gateId, packageId } }),
+    operation: () => createPackageGateCriterion(projectId, packageId, gateId, parseGateCriterionFormData(formData)),
+  });
 
   if (!criterion) {
     notFound();
@@ -541,13 +645,12 @@ export async function updatePackageGateCriterionAction(
   criterionId: string,
   formData: FormData,
 ) {
-  const criterion = await updatePackageGateCriterion(
+  const criterion = await withAuthorizedProjectMutation({
     projectId,
-    packageId,
-    gateId,
-    criterionId,
-    parseGateCriterionFormData(formData),
-  );
+    minimumRole: "editor",
+    audit: { eventType: "gate_criterion.updated", resourceType: "gate_criterion", resourceId: criterionId, metadata: { gateId, packageId } },
+    operation: () => updatePackageGateCriterion(projectId, packageId, gateId, criterionId, parseGateCriterionFormData(formData)),
+  });
 
   if (!criterion) {
     notFound();
@@ -563,7 +666,12 @@ export async function deletePackageGateCriterionAction(
   gateId: string,
   criterionId: string,
 ) {
-  const deleted = await deletePackageGateCriterion(projectId, packageId, gateId, criterionId);
+  const deleted = await withAuthorizedProjectMutation({
+    projectId,
+    minimumRole: "editor",
+    audit: { eventType: "gate_criterion.deleted", resourceType: "gate_criterion", resourceId: criterionId, metadata: { gateId, packageId } },
+    operation: () => deletePackageGateCriterion(projectId, packageId, gateId, criterionId),
+  });
 
   if (!deleted) {
     notFound();
@@ -574,10 +682,14 @@ export async function deletePackageGateCriterionAction(
 }
 
 export async function createProjectDeliverableAction(projectId: string, gateId: string, formData: FormData) {
-  await withGateWorkflowLock(async () => {
+  await withAuthorizedProjectMutation({
+    projectId,
+    minimumRole: "editor",
+    audit: (deliverable) => ({ eventType: "deliverable.created", resourceType: "deliverable", resourceId: deliverable.id, metadata: { gateId } }),
+    operation: () => withGateWorkflowLock(async () => {
     const { gate } = await requireProjectGatePreparation(projectId, gateId);
 
-    await createDeliverable(
+    return createDeliverable(
       parseDeliverableFormData(formData, {
         projectId,
         packageId: null,
@@ -586,6 +698,7 @@ export async function createProjectDeliverableAction(projectId: string, gateId: 
         validCriterionIds: gate.criteria.map((criterion) => criterion.id),
       }),
     );
+    }),
   });
 
   revalidateProjectGate(projectId, gateId);
@@ -598,7 +711,11 @@ export async function updateProjectDeliverableAction(
   deliverableId: string,
   formData: FormData,
 ) {
-  await withGateWorkflowLock(async () => {
+  await withAuthorizedProjectMutation({
+    projectId,
+    minimumRole: "editor",
+    audit: { eventType: "deliverable.updated", resourceType: "deliverable", resourceId: deliverableId, metadata: { gateId } },
+    operation: () => withGateWorkflowLock(async () => {
     const { gate } = await requireProjectGatePreparation(projectId, gateId);
 
     const deliverable = await updateDeliverable(
@@ -615,6 +732,8 @@ export async function updateProjectDeliverableAction(
     if (!deliverable) {
       notFound();
     }
+    return deliverable;
+    }),
   });
 
   revalidateProjectGate(projectId, gateId);
@@ -626,7 +745,11 @@ export async function deleteProjectDeliverableAction(
   gateId: string,
   deliverableId: string,
 ) {
-  await withGateWorkflowLock(async () => {
+  await withAuthorizedProjectMutation({
+    projectId,
+    minimumRole: "editor",
+    audit: { eventType: "deliverable.deleted", resourceType: "deliverable", resourceId: deliverableId, metadata: { gateId } },
+    operation: () => withGateWorkflowLock(async () => {
     await requireProjectGatePreparation(projectId, gateId);
     const deleted = await deleteDeliverable(deliverableId, {
       projectId,
@@ -637,6 +760,8 @@ export async function deleteProjectDeliverableAction(
     if (!deleted) {
       notFound();
     }
+    return deleted;
+    }),
   });
 
   revalidateProjectGate(projectId, gateId);
@@ -649,10 +774,14 @@ export async function createPackageDeliverableAction(
   gateId: string,
   formData: FormData,
 ) {
-  await withGateWorkflowLock(async () => {
+  await withAuthorizedProjectMutation({
+    projectId,
+    minimumRole: "editor",
+    audit: (deliverable) => ({ eventType: "deliverable.created", resourceType: "deliverable", resourceId: deliverable.id, metadata: { gateId, packageId } }),
+    operation: () => withGateWorkflowLock(async () => {
     const { gate } = await requirePackageGatePreparation(projectId, packageId, gateId);
 
-    await createDeliverable(
+    return createDeliverable(
       parseDeliverableFormData(formData, {
         projectId,
         packageId,
@@ -661,6 +790,7 @@ export async function createPackageDeliverableAction(
         validCriterionIds: gate.criteria.map((criterion) => criterion.id),
       }),
     );
+    }),
   });
 
   revalidatePackageGate(projectId, packageId, gateId);
@@ -674,7 +804,11 @@ export async function updatePackageDeliverableAction(
   deliverableId: string,
   formData: FormData,
 ) {
-  await withGateWorkflowLock(async () => {
+  await withAuthorizedProjectMutation({
+    projectId,
+    minimumRole: "editor",
+    audit: { eventType: "deliverable.updated", resourceType: "deliverable", resourceId: deliverableId, metadata: { gateId, packageId } },
+    operation: () => withGateWorkflowLock(async () => {
     const { gate } = await requirePackageGatePreparation(projectId, packageId, gateId);
 
     const deliverable = await updateDeliverable(
@@ -691,6 +825,8 @@ export async function updatePackageDeliverableAction(
     if (!deliverable) {
       notFound();
     }
+    return deliverable;
+    }),
   });
 
   revalidatePackageGate(projectId, packageId, gateId);
@@ -703,7 +839,11 @@ export async function deletePackageDeliverableAction(
   gateId: string,
   deliverableId: string,
 ) {
-  await withGateWorkflowLock(async () => {
+  await withAuthorizedProjectMutation({
+    projectId,
+    minimumRole: "editor",
+    audit: { eventType: "deliverable.deleted", resourceType: "deliverable", resourceId: deliverableId, metadata: { gateId, packageId } },
+    operation: () => withGateWorkflowLock(async () => {
     await requirePackageGatePreparation(projectId, packageId, gateId);
     const deleted = await deleteDeliverable(deliverableId, {
       projectId,
@@ -714,6 +854,8 @@ export async function deletePackageDeliverableAction(
     if (!deleted) {
       notFound();
     }
+    return deleted;
+    }),
   });
 
   revalidatePackageGate(projectId, packageId, gateId);

@@ -18,7 +18,10 @@ export async function proxy(request: NextRequest) {
     const user = await getCurrentUser(request.headers);
     if (!user) return NextResponse.redirect(signInUrl);
 
-    if (user.status !== "active" || user.accessClass !== "internal") {
+    if (
+      user.status !== "active" ||
+      (request.nextUrl.pathname.startsWith("/projects") && user.accessClass !== "internal")
+    ) {
       const deniedUrl = new URL("/access-denied", request.url);
       if (user.status !== "active") deniedUrl.searchParams.set("reason", "inactive");
       return NextResponse.redirect(deniedUrl);
@@ -32,5 +35,5 @@ export async function proxy(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/projects/:path*"],
+  matcher: ["/projects/:path*", "/reviews/:path*"],
 };

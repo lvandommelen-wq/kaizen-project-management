@@ -22,6 +22,7 @@ import {
   type GateCriterion,
   type GateCriterionInput,
   type GateReviewResponseInput,
+  type GateReviewActorSnapshot,
   type GateReviewResponseResult,
   type GateReviewInvitationAttemptResult,
   type GateSubmissionResult,
@@ -227,12 +228,14 @@ export async function submitPackageGateForApproval(
   projectId: string,
   packageId: string,
   gateId: string,
+  submittedBy?: GateReviewActorSnapshot,
 ): Promise<GateSubmissionResult<ProjectPackage> | null> {
   if (getOperationalDataBackend() === "postgres") {
     return postgresOperational.submitPackageGateForApproval(
       projectId,
       packageId,
       gateId,
+      submittedBy,
     );
   }
   return withGateWorkflowLock(async () => {

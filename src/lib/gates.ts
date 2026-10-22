@@ -47,12 +47,17 @@ export type GateApprover = {
   roleFunction: string;
   approvalRole: string;
   approvalLevel: number;
+  assignedUserId?: string | null;
+  expectedProviderTenantId?: string | null;
+  expectedProviderObjectId?: string | null;
 };
 
 export type GateReviewActorSnapshot = {
   userId: string | null;
   displayName: string;
   email: string | null;
+  providerTenantId?: string | null;
+  providerObjectId?: string | null;
 };
 
 export type GateReviewProjectSnapshot = {
@@ -169,6 +174,9 @@ export type GateReviewApproverSnapshot = {
   roleFunction: string;
   approvalRole: string;
   approvalLevel: number;
+  assignedUserId?: string | null;
+  expectedProviderTenantId?: string | null;
+  expectedProviderObjectId?: string | null;
   response: GateReviewApproverResponse | null;
   invitation: GateReviewInvitation | null;
 };
@@ -221,6 +229,7 @@ export type GateSubmissionIssue = {
     | "awaiting_approval"
     | "no_approvers"
     | "invalid_approvers"
+    | "invalid_approver_identities"
     | "invalid_criteria"
     | "incomplete_criteria"
     | "invalid_deliverables"
@@ -520,7 +529,22 @@ export function parseGateApproverFormData(formData: FormData): GateApproverInput
   return {
     ...input,
     approvalLevel,
+    assignedUserId: null,
+    expectedProviderTenantId: null,
+    expectedProviderObjectId: normalizeOptionalUuid(
+      String(formData.get("providerObjectId") ?? ""),
+      "Microsoft Entra Object ID",
+    ),
   };
+}
+
+function normalizeOptionalUuid(value: string, label: string) {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) return null;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(normalized)) {
+    throw new Error(`${label} must be a UUID.`);
+  }
+  return normalized;
 }
 
 export function getAwaitingGateReviewCycle(gate: Gate) {
@@ -952,6 +976,9 @@ export function createGateReviewCycle(input: CreateGateReviewCycleInput): GateRe
       roleFunction: approver.roleFunction,
       approvalRole: approver.approvalRole,
       approvalLevel: approver.approvalLevel,
+      assignedUserId: approver.assignedUserId,
+      expectedProviderTenantId: approver.expectedProviderTenantId,
+      expectedProviderObjectId: approver.expectedProviderObjectId,
       response: null,
       invitation: null,
     })),
