@@ -13,12 +13,14 @@ import {
 } from "@/lib/gate-review-invitations";
 import { getOperationalDataBackend } from "@/lib/operational/backend";
 import { recordAssignedGateReviewResponse } from "@/lib/operational/postgres";
+import { isExternalGateReviewAccessEnabled } from "@/lib/pilot-policy";
 
 export async function respondToAssignedGateReviewAction(
   reviewCycleId: string,
   formData: FormData,
 ) {
   if (getOperationalDataBackend() !== "postgres") notFound();
+  if (!isExternalGateReviewAccessEnabled()) notFound();
   const actor = await requireActiveUser();
   const outcome = String(formData.get("outcome") ?? "");
   const comment = String(formData.get("comment") ?? "").trim();

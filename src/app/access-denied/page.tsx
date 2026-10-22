@@ -19,7 +19,9 @@ export default async function AccessDeniedPage({
         <p className="mt-3 text-sm leading-6 text-slate-600">
           {reason === "inactive"
             ? "This application User is not active. Contact an application administrator if access should be restored."
-            : "External reviewer accounts cannot access normal Project or Package routes. Assigned frozen Gate Reviews will be made available through a dedicated route in a later increment."}
+            : reason === "pilot"
+              ? "External Gate Review access is disabled during the restricted Owner-only pilot."
+              : "This account is not authorized for the requested operational route."}
         </p>
         <div className="mt-6 flex flex-wrap gap-3">
           <SignOutButton />

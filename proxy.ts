@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getAuthConfigurationIssues } from "@/lib/auth";
 import { getCurrentUser } from "@/lib/current-user";
+import { isExternalGateReviewAccessEnabled } from "@/lib/pilot-policy";
 
 export async function proxy(request: NextRequest) {
   const signInUrl = new URL("/sign-in", request.url);
@@ -17,6 +18,13 @@ export async function proxy(request: NextRequest) {
   try {
     const user = await getCurrentUser(request.headers);
     if (!user) return NextResponse.redirect(signInUrl);
+
+    if (
+      request.nextUrl.pathname.startsWith("/reviews")
+      && !isExternalGateReviewAccessEnabled()
+    ) {
+      return NextResponse.redirect(new URL("/access-denied?reason=pilot", request.url));
+    }
 
     if (
       user.status !== "active" ||

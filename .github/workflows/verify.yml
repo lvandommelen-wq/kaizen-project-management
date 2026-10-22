@@ -1,0 +1,38 @@
+name: Verify
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      OPERATIONAL_DATA_BACKEND: postgres
+      OWNER_ONLY_PILOT: "true"
+      PILOT_OWNER_TENANT_ID: 10000000-0000-4000-8000-000000000001
+      PILOT_OWNER_OBJECT_ID: 20000000-0000-4000-8000-000000000001
+      BETTER_AUTH_SECRET: ci-only-secret-with-at-least-thirty-two-characters
+      BETTER_AUTH_URL: https://operations.example.invalid
+      APP_BASE_URL: https://operations.example.invalid
+      MICROSOFT_CLIENT_ID: 30000000-0000-4000-8000-000000000001
+      MICROSOFT_CLIENT_SECRET: ci-only-placeholder
+      MICROSOFT_TENANT_ID: 10000000-0000-4000-8000-000000000001
+      DATABASE_URL: postgresql://ci:ci@ep-ci-pooler.eu-central-1.aws.neon.tech/ci?sslmode=require
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npx tsc --noEmit
+      - run: npm run test:operational
+      - run: npm run build

@@ -3,6 +3,7 @@ import "server-only";
 import type { UserAccessClass, UserStatus } from "./auth";
 import { getAuth } from "./auth";
 import { getIdentityPool } from "./database";
+import { isPilotIdentityAllowed } from "./pilot-policy";
 
 export type CurrentUser = {
   id: string;
@@ -60,6 +61,10 @@ export async function getCurrentUser(requestHeaders: Headers): Promise<CurrentUs
   );
   if (result.rows.length !== 1) return null;
   const row = result.rows[0];
+  if (!isPilotIdentityAllowed({
+    providerTenantId: row.provider_tenant_id,
+    providerObjectId: row.provider_object_id,
+  })) return null;
 
   return {
     id: row.id,

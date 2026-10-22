@@ -28,6 +28,8 @@ APP_BASE_URL=http://localhost:3000
 
 `EMAIL_FROM` must contain a valid sender accepted by your Resend account, normally on a verified domain. `APP_BASE_URL` must be a credential-free absolute HTTP(S) URL and is used to create links to the exact frozen Review Cycle. Never prefix these variables with `NEXT_PUBLIC_` or commit their values.
 
+Email configuration must remain absent during the restricted Owner-only production pilot.
+
 To test delivery, submit a prepared Project or Package Gate with an Approver email address you control. Review History records each delivery attempt, its sanitized failure details, and the provider message ID when Resend accepts the send request. `Sent` means submission to Resend succeeded; it does not claim inbox delivery. An active failed invitation can be retried from Review History after configuration is corrected. Refreshing or opening a Gate page does not send email.
 
 ## Identity Foundation
@@ -135,6 +137,8 @@ In PostgreSQL mode, every Project requires at least one active internal Owner. T
 
 External Gate Approvers use Microsoft Entra B2B guest accounts. Invite and assign the guest to the enterprise application in Entra, then enter the guest's resource-tenant Object ID in the controlled Gate Approver configuration. The invitation email is delivery-only: `/reviews/<review-cycle-id>` requires authentication and an exact tenant ID plus object ID match against the frozen Approver assignment.
 
+When `OWNER_ONLY_PILOT=true`, only the exact configured tenant/object identity is admitted, automatic User creation is disabled, and all external Gate Review routes and mutations are blocked. See [`docs/owner-pilot-runbook.md`](docs/owner-pilot-runbook.md) for the production configuration, manual identity transfer, deployment order, rollback, backup, and recovery controls.
+
 PostgreSQL mutations create append-only audit events in the same transaction. Project members can inspect the latest events from the Project History page. Existing immutable Gate responses and invitation attempts remain the detailed governance evidence for those workflows.
 
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
@@ -150,8 +154,6 @@ To learn more about Next.js, take a look at the following resources:
 
 You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
 
-## Deploy on Vercel
+## Deployment
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Cloud provisioning and production cutover are controlled manual operations. Follow the Owner-only pilot runbook; do not use an automatic deployment wizard or expose administrative database credentials to the application runtime.

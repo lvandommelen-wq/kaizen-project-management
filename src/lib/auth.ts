@@ -4,6 +4,12 @@ import { betterAuth } from "better-auth";
 import { decodeJwt } from "jose";
 import type { Pool } from "pg";
 import { getIdentityPool } from "./database";
+import { assertProductionConfiguration } from "./deployment-policy";
+import {
+  getOwnerOnlyPilotConfigurationIssues,
+  isAutomaticUserCreationAllowed,
+  isPilotIdentityAllowed,
+} from "./pilot-policy";
 
 export const userStatuses = ["invited", "active", "disabled"] as const;
 export const userAccessClasses = ["internal", "external_reviewer"] as const;
@@ -57,7 +63,9 @@ export function getAuthConfigurationIssues() {
     issues.push("DATABASE_URL must be a PostgreSQL connection URL.");
   }
 
-  return issues;
+  issues.push(...getOwnerOnlyPilotConfigurationIssues());
+
+  return [...new Set(issues)];
 }
 
 export function isAuthenticationConfigured() {
@@ -227,6 +235,7 @@ function createAuth(environment: AuthEnvironment, pool: Pool) {
       user: {
         create: {
           async before(user) {
+            if (!isAutomaticUserCreationAllowed()) return false;
             return {
               data: {
                 ...user,
@@ -249,6 +258,10 @@ function createAuth(environment: AuthEnvironment, pool: Pool) {
 
             const decoded = decodeJwt(account.idToken);
             const claims = readMicrosoftClaims(decoded, environment.tenantId, account.accountId);
+            if (!isPilotIdentityAllowed({
+              providerTenantId: claims.tenantId,
+              providerObjectId: claims.objectId,
+            })) return false;
             const now = new Date();
 
             return {
@@ -273,6 +286,10 @@ function createAuth(environment: AuthEnvironment, pool: Pool) {
 
             const decoded = decodeJwt(account.idToken);
             const claims = readMicrosoftClaims(decoded, environment.tenantId);
+            if (!isPilotIdentityAllowed({
+              providerTenantId: claims.tenantId,
+              providerObjectId: claims.objectId,
+            })) return false;
 
             return {
               data: {
@@ -319,6 +336,10 @@ function createAuth(environment: AuthEnvironment, pool: Pool) {
               || !isUuid(identity.provider_object_id)
               || !identity.provider_subject.trim()
               || !email
+              || !isPilotIdentityAllowed({
+                providerTenantId: environment.tenantId,
+                providerObjectId: identity.provider_object_id,
+              })
             ) {
               return false;
             }
@@ -364,6 +385,7 @@ function createAuth(environment: AuthEnvironment, pool: Pool) {
 }
 
 function requireAuthEnvironment(): AuthEnvironment {
+  assertProductionConfiguration();
   const issues = getAuthConfigurationIssues();
   if (issues.length > 0) {
     throw new Error(`Authentication is not configured: ${issues.join(" ")}`);

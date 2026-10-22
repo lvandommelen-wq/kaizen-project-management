@@ -533,7 +533,7 @@ async function assertOperationalSchema(client) {
       )`,
   );
   if (result.rowCount !== 3) {
-    throw new Error("Operational migrations 004, 005, and 006 have not all been applied to the target database.");
+    throw new Error("Operational migrations 004, 005, and 007 have not all been applied to the target database.");
   }
 }
 

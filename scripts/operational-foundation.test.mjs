@@ -183,6 +183,147 @@ test("JSON persistence is allowed in development and rejected in production", as
   );
 });
 
+test("Owner-only pilot policy allows only the exact approved Entra identity", async () => {
+  const {
+    isAutomaticUserCreationAllowed,
+    isExternalGateReviewAccessEnabled,
+    isPilotIdentityAllowed,
+  } = await import("../src/lib/pilot-policy.ts");
+  const environment = {
+    OWNER_ONLY_PILOT: "true",
+    PILOT_OWNER_TENANT_ID: "10000000-0000-4000-8000-000000000001",
+    PILOT_OWNER_OBJECT_ID: "20000000-0000-4000-8000-000000000001",
+  };
+
+  assert.equal(isPilotIdentityAllowed({
+    providerTenantId: "10000000-0000-4000-8000-000000000001",
+    providerObjectId: "20000000-0000-4000-8000-000000000001",
+  }, environment), true);
+  assert.equal(isPilotIdentityAllowed({
+    providerTenantId: "10000000-0000-4000-8000-000000000001",
+    providerObjectId: "20000000-0000-4000-8000-000000000002",
+  }, environment), false);
+  assert.equal(isPilotIdentityAllowed({
+    providerTenantId: "10000000-0000-4000-8000-000000000002",
+    providerObjectId: "20000000-0000-4000-8000-000000000001",
+  }, environment), false);
+  assert.equal(isAutomaticUserCreationAllowed(environment), false);
+  assert.equal(isExternalGateReviewAccessEnabled(environment), false);
+});
+
+test("Owner-only pilot policy preserves the local development default", async () => {
+  const {
+    isAutomaticUserCreationAllowed,
+    isExternalGateReviewAccessEnabled,
+    isPilotIdentityAllowed,
+  } = await import("../src/lib/pilot-policy.ts");
+  const environment = {};
+
+  assert.equal(isPilotIdentityAllowed({
+    providerTenantId: "10000000-0000-4000-8000-000000000001",
+    providerObjectId: "20000000-0000-4000-8000-000000000002",
+  }, environment), true);
+  assert.equal(isAutomaticUserCreationAllowed(environment), true);
+  assert.equal(isExternalGateReviewAccessEnabled(environment), true);
+});
+
+test("production configuration rejects unsafe pilot and runtime settings", async () => {
+  const { getProductionConfigurationIssues } = await import(
+    "../src/lib/deployment-policy.ts"
+  );
+  const safe = {
+    NODE_ENV: "production",
+    OPERATIONAL_DATA_BACKEND: "postgres",
+    OWNER_ONLY_PILOT: "true",
+    PILOT_OWNER_TENANT_ID: "10000000-0000-4000-8000-000000000001",
+    PILOT_OWNER_OBJECT_ID: "20000000-0000-4000-8000-000000000001",
+    BETTER_AUTH_SECRET: "ci-only-secret-with-at-least-thirty-two-characters",
+    BETTER_AUTH_URL: "https://operations.example.com",
+    APP_BASE_URL: "https://operations.example.com",
+    MICROSOFT_CLIENT_ID: "30000000-0000-4000-8000-000000000001",
+    MICROSOFT_CLIENT_SECRET: "configured-outside-source-control",
+    MICROSOFT_TENANT_ID: "10000000-0000-4000-8000-000000000001",
+    DATABASE_URL: "postgresql://runtime:secret@example-pooler.eu-central-1.aws.neon.tech/kaizen?sslmode=require",
+  };
+
+  assert.deepEqual(getProductionConfigurationIssues(safe), []);
+  const issues = getProductionConfigurationIssues({
+    ...safe,
+    OWNER_ONLY_PILOT: "false",
+    OPERATIONAL_DATA_BACKEND: "json",
+    DATABASE_URL: "postgresql://runtime:secret@example.eu-central-1.aws.neon.tech/kaizen",
+    RESEND_API_KEY: "configured-too-early",
+    NEXT_PUBLIC_DATABASE_URL: "must-not-be-public",
+  });
+  assert.ok(issues.some((issue) => issue.includes("OWNER_ONLY_PILOT")));
+  assert.ok(issues.some((issue) => issue.includes("OPERATIONAL_DATA_BACKEND")));
+  assert.ok(issues.some((issue) => issue.includes("pooled runtime endpoint")));
+  assert.ok(issues.some((issue) => issue.includes("require TLS")));
+  assert.ok(issues.some((issue) => issue.includes("must be absent")));
+  assert.ok(issues.some((issue) => issue.includes("NEXT_PUBLIC_DATABASE_URL")));
+});
+
+test("Owner identity transfers are fingerprinted and reject credential fields", async () => {
+  const { createTransfer, validateTransfer } = await import("./transfer-owner-identity.mjs");
+  const userId = "30000000-0000-4000-8000-000000000001";
+  const data = {
+    organizations: [],
+    users: [{
+      id: userId,
+      display_name: "Pilot Owner",
+      email: "owner@example.com",
+      normalized_email: "owner@example.com",
+      email_verified: true,
+      image: null,
+      organization_id: null,
+      status: "active",
+      access_class: "internal",
+      last_authenticated_at: "2026-10-22T12:00:00.000Z",
+      created_at: "2026-10-22T12:00:00.000Z",
+      updated_at: "2026-10-22T12:00:00.000Z",
+    }],
+    identities: [{
+      id: "40000000-0000-4000-8000-000000000001",
+      provider: "microsoft",
+      provider_object_id: "20000000-0000-4000-8000-000000000001",
+      user_id: userId,
+      access_token_expires_at: null,
+      refresh_token_expires_at: null,
+      scope: "openid profile email",
+      provider_tenant_id: "10000000-0000-4000-8000-000000000001",
+      provider_subject: "subject",
+      provider_email_snapshot: "owner@example.com",
+      entra_account_type: 0,
+      last_authenticated_at: "2026-10-22T12:00:00.000Z",
+      created_at: "2026-10-22T12:00:00.000Z",
+      updated_at: "2026-10-22T12:00:00.000Z",
+    }],
+  };
+  const transfer = createTransfer(data, "2026-10-22T12:00:00.000Z");
+
+  assert.equal(validateTransfer(transfer).fingerprint, transfer.fingerprint);
+  assert.throws(
+    () => validateTransfer({
+      ...transfer,
+      data: {
+        ...data,
+        identities: [{ ...data.identities[0], access_token: "must-not-transfer" }],
+      },
+    }),
+    /approved transfer schema/,
+  );
+  assert.throws(
+    () => validateTransfer({
+      ...transfer,
+      data: {
+        ...data,
+        users: [{ ...data.users[0], display_name: "Tampered" }],
+      },
+    }),
+    /fingerprint does not match/,
+  );
+});
+
 test("migration loading rejects duplicate numeric versions", async () => {
   const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "kaizen-migration-versions-"));
   try {

@@ -10,12 +10,14 @@
     "db:identity:migrate": "node scripts/migrate-identity.mjs",
     "db:migrate": "node scripts/migrate-identity.mjs",
     "db:migrate:status": "node scripts/migrate-identity.mjs --status",
+    "db:identity:export": "node scripts/transfer-owner-identity.mjs export",
+    "db:identity:import": "node scripts/transfer-owner-identity.mjs import",
     "db:operational": "node scripts/import-operational-data.mjs",
     "test:operational": "node --test scripts/*.test.mjs",
     "test:operational:integration": "node scripts/run-operational-integration-tests.mjs"
   },
   "engines": {
-    "node": ">=24"
+    "node": "24.x"
   },
   "dependencies": {
     "better-auth": "1.7.7",

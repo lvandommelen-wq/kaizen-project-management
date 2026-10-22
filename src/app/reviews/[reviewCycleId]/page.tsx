@@ -10,6 +10,7 @@ import {
 } from "@/lib/gates";
 import { getOperationalDataBackend } from "@/lib/operational/backend";
 import { getAssignedGateReview } from "@/lib/operational/postgres";
+import { isExternalGateReviewAccessEnabled } from "@/lib/pilot-policy";
 
 export const dynamic = "force-dynamic";
 
@@ -20,6 +21,7 @@ export default async function AssignedReviewPage({
   const { reviewCycleId } = await params;
   const query = await searchParams;
   if (getOperationalDataBackend() !== "postgres") notFound();
+  if (!isExternalGateReviewAccessEnabled()) notFound();
   const actor = await getCurrentUser(await headers());
   if (!actor) {
     redirect(`/sign-in?callbackUrl=${encodeURIComponent(`/reviews/${reviewCycleId}`)}`);
