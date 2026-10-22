@@ -7,6 +7,8 @@ import {
   removeCriterionFromDeliverables,
 } from "./deliverables";
 import {
+  claimGateReviewInvitationAttempt,
+  completeGateReviewInvitationAttempt,
   createGateReviewCycle,
   createGates,
   getGateSubmissionIssues,
@@ -21,10 +23,13 @@ import {
   type GateCriterionInput,
   type GateReviewResponseInput,
   type GateReviewResponseResult,
+  type GateReviewInvitationAttemptResult,
   type GateSubmissionResult,
   type GateWithdrawalResult,
 } from "./gates";
 import { packageGateTemplates } from "./governance-templates";
+import { getOperationalDataBackend } from "./operational/backend";
+import * as postgresOperational from "./operational/postgres";
 import {
   getGateActions,
   protectGateActionsForDecision,
@@ -134,6 +139,9 @@ async function writePackagesFile(packages: ProjectPackage[]) {
 }
 
 export async function getPackages(projectId: string) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.getPackages(projectId);
+  }
   const packages = await readPackagesFile();
   const projectPackages = packages.filter((projectPackage) => projectPackage.projectId === projectId);
 
@@ -145,6 +153,9 @@ export async function getPackages(projectId: string) {
 }
 
 export async function getPackage(projectId: string, packageId: string) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.getPackage(projectId, packageId);
+  }
   const packages = await readPackagesFile();
   const projectPackage =
     packages.find((projectPackage) => projectPackage.projectId === projectId && projectPackage.id === packageId) ?? null;
@@ -157,6 +168,9 @@ export async function getPackage(projectId: string, packageId: string) {
 }
 
 export async function createPackage(projectId: string, input: PackageFormInput) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.createPackage(projectId, input);
+  }
   return withGateWorkflowLock(async () => {
     const packages = await readPackagesFile();
     assertUniquePackageCode(packages, projectId, input.packageCode);
@@ -180,6 +194,9 @@ export async function createPackage(projectId: string, input: PackageFormInput) 
 }
 
 export async function updatePackage(projectId: string, packageId: string, input: PackageFormInput) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.updatePackage(projectId, packageId, input);
+  }
   return withGateWorkflowLock(async () => {
     const packages = await readPackagesFile();
     const index = packages.findIndex(
@@ -211,6 +228,13 @@ export async function submitPackageGateForApproval(
   packageId: string,
   gateId: string,
 ): Promise<GateSubmissionResult<ProjectPackage> | null> {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.submitPackageGateForApproval(
+      projectId,
+      packageId,
+      gateId,
+    );
+  }
   return withGateWorkflowLock(async () => {
     const [project, packages] = await Promise.all([getProject(projectId), readPackagesFile()]);
     const projectPackage = packages.find(
@@ -278,6 +302,13 @@ export async function withdrawPackageGateSubmission(
   packageId: string,
   gateId: string,
 ): Promise<GateWithdrawalResult<ProjectPackage> | null> {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.withdrawPackageGateSubmission(
+      projectId,
+      packageId,
+      gateId,
+    );
+  }
   return withGateWorkflowLock(async () => {
     const [project, packages] = await Promise.all([getProject(projectId), readPackagesFile()]);
     const projectPackage = packages.find(
@@ -320,6 +351,11 @@ export async function respondToPackageGateReview(
   gateId: string,
   input: GateReviewResponseInput,
 ): Promise<GateReviewResponseResult<ProjectPackage> | null> {
+  if (getOperationalDataBackend() === "postgres") {
+    throw new Error(
+      "PostgreSQL Gate Review responses require authenticated approver assignment and are not enabled yet.",
+    );
+  }
   return withGateWorkflowLock(async () => {
     const packages = await readPackagesFile();
     const projectPackage = packages.find(
@@ -386,7 +422,112 @@ export async function respondToPackageGateReview(
   });
 }
 
+export async function claimPackageGateReviewInvitation(
+  projectId: string,
+  packageId: string,
+  gateId: string,
+  reviewCycleId: string,
+  gateApproverId: string,
+  allowFailedRetry = false,
+) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.claimPackageGateReviewInvitation(
+      projectId,
+      packageId,
+      gateId,
+      reviewCycleId,
+      gateApproverId,
+      allowFailedRetry,
+    );
+  }
+  return withGateWorkflowLock(async () => {
+    const packages = await readPackagesFile();
+    const projectPackage = packages.find(
+      (candidate) => candidate.projectId === projectId && candidate.id === packageId,
+    );
+    const gate = projectPackage?.gates.find((candidate) => candidate.id === gateId);
+    const reviewCycle = gate?.reviewCycles.find(
+      (candidate) => candidate.id === reviewCycleId,
+    );
+    if (!projectPackage || !gate || !reviewCycle) return null;
+
+    const attemptId = randomUUID();
+    const claim = claimGateReviewInvitationAttempt(
+      reviewCycle,
+      gateApproverId,
+      {
+        attemptId,
+        idempotencyKey: `gate-review-invitation/${attemptId}`,
+        provider: "resend",
+        attemptedAt: new Date().toISOString(),
+        allowFailedRetry,
+      },
+    );
+    if (!claim) return null;
+
+    await writePackagesFile(packages);
+    return {
+      projectPackage,
+      gate,
+      reviewCycle,
+      approver: claim.approver,
+      attempt: claim.attempt,
+    };
+  });
+}
+
+export async function completePackageGateReviewInvitation(
+  projectId: string,
+  packageId: string,
+  gateId: string,
+  reviewCycleId: string,
+  gateApproverId: string,
+  attemptId: string,
+  result: GateReviewInvitationAttemptResult,
+  claimToken?: string,
+) {
+  if (getOperationalDataBackend() === "postgres") {
+    if (!claimToken) return false;
+    return postgresOperational.completePackageGateReviewInvitation(
+      projectId,
+      packageId,
+      gateId,
+      reviewCycleId,
+      gateApproverId,
+      attemptId,
+      claimToken,
+      result,
+    );
+  }
+  return withGateWorkflowLock(async () => {
+    const packages = await readPackagesFile();
+    const projectPackage = packages.find(
+      (candidate) => candidate.projectId === projectId && candidate.id === packageId,
+    );
+    const gate = projectPackage?.gates.find((candidate) => candidate.id === gateId);
+    const reviewCycle = gate?.reviewCycles.find(
+      (candidate) => candidate.id === reviewCycleId,
+    );
+    if (!projectPackage || !reviewCycle) return false;
+
+    const completed = completeGateReviewInvitationAttempt(
+      reviewCycle,
+      gateApproverId,
+      attemptId,
+      result,
+      new Date().toISOString(),
+    );
+    if (!completed) return false;
+
+    await writePackagesFile(packages);
+    return true;
+  });
+}
+
 export async function reopenPackageGate(projectId: string, packageId: string, gateId: string) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.reopenPackageGate(projectId, packageId, gateId);
+  }
   return withGateWorkflowLock(async () => {
     const packages = await readPackagesFile();
     const projectPackage = packages.find(
@@ -409,6 +550,9 @@ export async function reopenPackageGate(projectId: string, packageId: string, ga
 }
 
 export async function returnPackageToPreviousStage(projectId: string, packageId: string) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.returnPackageToPreviousStage(projectId, packageId);
+  }
   return withGateWorkflowLock(async () => {
     const packages = await readPackagesFile();
     const index = packages.findIndex(
@@ -452,6 +596,14 @@ export async function createPackageGateApprover(
   gateId: string,
   input: GateApproverInput,
 ) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.createPackageGateApprover(
+      projectId,
+      packageId,
+      gateId,
+      input,
+    );
+  }
   return withGateWorkflowLock(async () => {
     const packages = await readPackagesFile();
     const projectPackage = packages.find(
@@ -482,6 +634,15 @@ export async function updatePackageGateApprover(
   approverId: string,
   input: GateApproverInput,
 ) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.updatePackageGateApprover(
+      projectId,
+      packageId,
+      gateId,
+      approverId,
+      input,
+    );
+  }
   return withGateWorkflowLock(async () => {
     const packages = await readPackagesFile();
     const projectPackage = packages.find(
@@ -514,6 +675,14 @@ export async function deletePackageGateApprover(
   gateId: string,
   approverId: string,
 ) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.deletePackageGateApprover(
+      projectId,
+      packageId,
+      gateId,
+      approverId,
+    );
+  }
   return withGateWorkflowLock(async () => {
     const packages = await readPackagesFile();
     const projectPackage = packages.find(
@@ -541,6 +710,14 @@ export async function createPackageGateCriterion(
   gateId: string,
   input: GateCriterionInput,
 ) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.createPackageGateCriterion(
+      projectId,
+      packageId,
+      gateId,
+      input,
+    );
+  }
   return withGateWorkflowLock(async () => {
     const packages = await readPackagesFile();
     const packageIndex = packages.findIndex(
@@ -577,6 +754,15 @@ export async function updatePackageGateCriterion(
   criterionId: string,
   input: GateCriterionInput,
 ) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.updatePackageGateCriterion(
+      projectId,
+      packageId,
+      gateId,
+      criterionId,
+      input,
+    );
+  }
   return withGateWorkflowLock(async () => {
     const packages = await readPackagesFile();
     const packageIndex = packages.findIndex(
@@ -615,6 +801,14 @@ export async function deletePackageGateCriterion(
   gateId: string,
   criterionId: string,
 ) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.deletePackageGateCriterion(
+      projectId,
+      packageId,
+      gateId,
+      criterionId,
+    );
+  }
   return withGateWorkflowLock(async () => {
     const packages = await readPackagesFile();
     const packageIndex = packages.findIndex(
@@ -648,6 +842,9 @@ export async function deletePackageGateCriterion(
 }
 
 export async function deletePackage(projectId: string, packageId: string) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.deletePackage(projectId, packageId);
+  }
   const packages = await readPackagesFile();
   const remainingPackages = packages.filter(
     (projectPackage) => !(projectPackage.projectId === projectId && projectPackage.id === packageId),
@@ -662,6 +859,9 @@ export async function deletePackage(projectId: string, packageId: string) {
 }
 
 export async function deletePackagesForProject(projectId: string) {
+  if (getOperationalDataBackend() === "postgres") {
+    return;
+  }
   const packages = await readPackagesFile();
   const remainingPackages = packages.filter((projectPackage) => projectPackage.projectId !== projectId);
 

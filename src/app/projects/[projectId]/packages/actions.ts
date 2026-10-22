@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { notFound, redirect } from "next/navigation";
 import { deleteDeliverablesForPackage } from "@/lib/deliverables";
+import { getOperationalDataBackend } from "@/lib/operational/backend";
 import {
   hasActionsForPackage,
   withGateWorkflowLock,
@@ -74,6 +75,18 @@ export async function returnPackageToPreviousStageAction(projectId: string, pack
 }
 
 export async function deletePackageAction(projectId: string, packageId: string) {
+  if (getOperationalDataBackend() === "postgres") {
+    if (await hasActionsForPackage(projectId, packageId)) {
+      redirect(`/projects/${projectId}/packages/${packageId}?deleteError=linked-actions`);
+    }
+    const deleted = await deletePackage(projectId, packageId);
+    if (!deleted) notFound();
+    revalidatePath("/projects");
+    revalidatePath(`/projects/${projectId}`);
+    revalidatePath(`/projects/${projectId}/packages/${packageId}`);
+    redirect(`/projects/${projectId}`);
+  }
+
   await withGateWorkflowLock(async () => {
     if (await hasActionsForPackage(projectId, packageId)) {
       redirect(`/projects/${projectId}/packages/${packageId}?deleteError=linked-actions`);

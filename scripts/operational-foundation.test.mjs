@@ -153,6 +153,7 @@ test("migration files are ordered, named, and checksummed", async () => {
       "003_remove_stored_id_tokens.sql",
       "004_operational_data_foundation.sql",
       "005_protect_gate_review_attempt_history.sql",
+      "006_runtime_persistence_safety.sql",
     ],
   );
   assert.ok(migrations.every((migration) => /^[0-9a-f]{64}$/.test(migration.checksum)));

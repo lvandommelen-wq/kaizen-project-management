@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { notFound, redirect } from "next/navigation";
 import { deleteDeliverablesForProject } from "@/lib/deliverables";
 import { deletePackagesForProject } from "@/lib/packages";
+import { getOperationalDataBackend } from "@/lib/operational/backend";
 import {
   deleteActionsForProject,
   getProjectActionDeletionBlocker,
@@ -135,6 +136,13 @@ export async function returnProjectToPreviousStageAction(projectId: string) {
 }
 
 export async function deleteProjectAction(projectId: string) {
+  if (getOperationalDataBackend() === "postgres") {
+    const deleted = await deleteProject(projectId);
+    if (!deleted) notFound();
+    revalidatePath("/projects");
+    redirect("/projects");
+  }
+
   await withGateWorkflowLock(async () => {
     const blocker = await getProjectActionDeletionBlocker(projectId);
     if (blocker) {

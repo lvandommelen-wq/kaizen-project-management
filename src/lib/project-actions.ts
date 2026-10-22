@@ -10,6 +10,8 @@ import {
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
+import { getOperationalDataBackend } from "./operational/backend";
+import * as postgresOperational from "./operational/postgres";
 
 export const projectActionStatuses = [
   "new",
@@ -497,6 +499,9 @@ function isProcessRunning(pid: number) {
 }
 
 export async function withGateWorkflowLock<T>(operation: () => Promise<T>) {
+  if (getOperationalDataBackend() === "postgres") {
+    return operation();
+  }
   const queued = gateWorkflowQueue.then(() =>
     withFileLock(gateWorkflowLockFile, operation),
   );
@@ -507,6 +512,9 @@ export async function withGateWorkflowLock<T>(operation: () => Promise<T>) {
 export async function withGovernanceTierWorkflowLock<T>(
   operation: () => Promise<T>,
 ) {
+  if (getOperationalDataBackend() === "postgres") {
+    return operation();
+  }
   const queued = governanceTierWorkflowQueue.then(() =>
     withFileLock(governanceTierWorkflowLockFile, operation),
   );
@@ -699,6 +707,9 @@ export function isProjectActionOverdue(action: ProjectAction, today: string) {
 }
 
 export async function getProjectActions(projectId: string) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.getProjectActions(projectId);
+  }
   const store = await readStore();
   return store.actions
     .filter((action) => action.projectId === projectId)
@@ -706,6 +717,9 @@ export async function getProjectActions(projectId: string) {
 }
 
 export async function getProjectAction(projectId: string, actionId: string) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.getProjectAction(projectId, actionId);
+  }
   const store = await readStore();
   return (
     store.actions.find(
@@ -715,6 +729,9 @@ export async function getProjectAction(projectId: string, actionId: string) {
 }
 
 export async function hasActionsForPackage(projectId: string, packageId: string) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.hasActionsForPackage(projectId, packageId);
+  }
   const actions = await getProjectActions(projectId);
   return actions.some((action) => action.packageIds.includes(packageId));
 }
@@ -723,6 +740,12 @@ export async function getGovernanceTierActionReferences(
   projectId: string,
   governanceTierId: string,
 ) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.getGovernanceTierActionReferences(
+      projectId,
+      governanceTierId,
+    );
+  }
   const actions = await getProjectActions(projectId);
   const currentActionIds = actions
     .filter((action) => action.governanceTierId === governanceTierId)
@@ -748,6 +771,9 @@ export async function getGovernanceTierActionReferences(
 }
 
 export async function getProjectActionDeletionBlocker(projectId: string) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.getProjectActionDeletionBlocker(projectId);
+  }
   const actions = await getProjectActions(projectId);
   const protectedActions = actions.filter(
     (action) => action.gateDecisionReferences.length > 0,
@@ -757,6 +783,9 @@ export async function getProjectActionDeletionBlocker(projectId: string) {
 }
 
 export async function getGateActions(projectId: string, gateId: string) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.getGateActions(projectId, gateId);
+  }
   const actions = await getProjectActions(projectId);
   return actions.filter(
     (action) => action.source === "gate" && action.gateId === gateId,
@@ -768,6 +797,9 @@ export async function createManualProjectAction(
   input: ProjectActionInput,
   loggedBy: ActionActor,
 ) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.createManualProjectAction(projectId, input, loggedBy);
+  }
   if (input.status === "closed") {
     throw new Error("Create the Action before closing it.");
   }
@@ -823,6 +855,16 @@ export async function createGateProjectAction(
   input: GateProjectActionInput,
   loggedBy: ActionActor,
 ) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.createGateProjectAction(
+      projectId,
+      gateId,
+      packageIds,
+      packageAssociationLocked,
+      input,
+      loggedBy,
+    );
+  }
   return withStoreMutation(async (store) => {
     const now = new Date().toISOString();
     const sequence = store.nextSequenceByProject[projectId] ?? 1;
@@ -876,6 +918,16 @@ export async function updateProjectAction(
   input: ProjectActionInput,
   updatedBy: ActionActor,
 ) {
+  if (getOperationalDataBackend() === "postgres") {
+    const action = await postgresOperational.updateProjectAction(
+      projectId,
+      actionId,
+      input,
+      updatedBy,
+    );
+    if (!action) throw new Error("Action not found.");
+    return action;
+  }
   return withStoreMutation(async (store) => {
     const action = store.actions.find(
       (item) => item.projectId === projectId && item.id === actionId,
@@ -948,6 +1000,16 @@ export async function addProjectActionUpdate(
   text: string,
   updatedBy: ActionActor,
 ) {
+  if (getOperationalDataBackend() === "postgres") {
+    const action = await postgresOperational.addProjectActionUpdate(
+      projectId,
+      actionId,
+      text,
+      updatedBy,
+    );
+    if (!action) throw new Error("Action not found.");
+    return action;
+  }
   return withStoreMutation(async (store) => {
     const action = store.actions.find(
       (item) => item.projectId === projectId && item.id === actionId,
@@ -967,6 +1029,16 @@ export async function closeProjectAction(
   closedBy: ActionActor,
   comment: string | null,
 ) {
+  if (getOperationalDataBackend() === "postgres") {
+    const action = await postgresOperational.closeProjectAction(
+      projectId,
+      actionId,
+      closedBy,
+      comment,
+    );
+    if (!action) throw new Error("Action not found.");
+    return action;
+  }
   return withStoreMutation(async (store) => {
     const action = store.actions.find(
       (item) => item.projectId === projectId && item.id === actionId,
@@ -999,6 +1071,17 @@ export async function reopenProjectAction(
   reopenedBy: ActionActor,
   comment: string | null,
 ) {
+  if (getOperationalDataBackend() === "postgres") {
+    const action = await postgresOperational.reopenProjectAction(
+      projectId,
+      actionId,
+      status,
+      reopenedBy,
+      comment,
+    );
+    if (!action) throw new Error("Action not found.");
+    return action;
+  }
   return withStoreMutation(async (store) => {
     const action = store.actions.find(
       (item) => item.projectId === projectId && item.id === actionId,
@@ -1032,6 +1115,11 @@ export async function protectGateActionsForDecision(
   decision: Extract<ProtectedGateDecision, "approved_with_actions">,
   acceptedActionIds: string[],
 ): Promise<GateActionProtectionResult> {
+  if (getOperationalDataBackend() === "postgres") {
+    throw new Error(
+      "PostgreSQL Gate Action protection is only available inside the transactional approval workflow.",
+    );
+  }
   return withStoreMutation(async (store) => {
     const uniqueActionIds = [...new Set(acceptedActionIds)];
     const acceptedActionIdSet = new Set(uniqueActionIds);
@@ -1067,6 +1155,14 @@ export async function rollbackGateActionProtection(
   projectId: string,
   referenceIds: string[],
 ) {
+  if (getOperationalDataBackend() === "postgres") {
+    if (referenceIds.length > 0) {
+      throw new Error(
+        "PostgreSQL Gate Action protection rollback is handled by the approval transaction.",
+      );
+    }
+    return;
+  }
   if (referenceIds.length === 0) return;
   const references = new Set(referenceIds);
 
@@ -1090,6 +1186,9 @@ export async function deleteProjectAction(
   projectId: string,
   actionId: string,
 ): Promise<ProjectActionDeletionResult> {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.deleteProjectAction(projectId, actionId);
+  }
   return withStoreMutation(async (store) => {
     const index = store.actions.findIndex(
       (action) => action.projectId === projectId && action.id === actionId,
@@ -1112,6 +1211,9 @@ export async function deleteProjectAction(
 }
 
 export async function deleteActionsForProject(projectId: string) {
+  if (getOperationalDataBackend() === "postgres") {
+    return 0;
+  }
   return withStoreMutation(async (store) => {
     if (
       store.actions.some(

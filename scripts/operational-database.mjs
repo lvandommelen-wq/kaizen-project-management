@@ -526,13 +526,14 @@ async function assertOperationalSchema(client) {
   const result = await client.query(
     `SELECT name
      FROM identity_schema_migration
-     WHERE name IN (
-       '004_operational_data_foundation.sql',
-       '005_protect_gate_review_attempt_history.sql'
-     )`,
+      WHERE name IN (
+        '004_operational_data_foundation.sql',
+        '005_protect_gate_review_attempt_history.sql',
+        '006_runtime_persistence_safety.sql'
+      )`,
   );
-  if (result.rowCount !== 2) {
-    throw new Error("Operational migrations 004 and 005 have not both been applied to the target database.");
+  if (result.rowCount !== 3) {
+    throw new Error("Operational migrations 004, 005, and 006 have not all been applied to the target database.");
   }
 }
 

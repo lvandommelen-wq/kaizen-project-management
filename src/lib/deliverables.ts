@@ -3,6 +3,8 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Gate } from "./gates";
 import type { GovernanceGateTemplate } from "./governance-templates";
+import { getOperationalDataBackend } from "./operational/backend";
+import * as postgresOperational from "./operational/postgres";
 
 export const deliverableStatuses = ["not_started", "in_progress", "completed", "not_applicable"] as const;
 export const deliverableScopeLevels = ["project", "package"] as const;
@@ -68,6 +70,9 @@ async function writeDeliverablesFile(deliverables: Deliverable[]) {
 }
 
 export async function getGateDeliverables(projectId: string, packageId: string | null, gateId: string) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.getGateDeliverables(projectId, packageId, gateId);
+  }
   const deliverables = await readDeliverablesFile();
   return deliverables.filter(
     (deliverable) =>
@@ -76,6 +81,9 @@ export async function getGateDeliverables(projectId: string, packageId: string |
 }
 
 export async function createDeliverable(input: DeliverableInput) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.createDeliverable(input);
+  }
   const deliverables = await readDeliverablesFile();
   const now = new Date().toISOString();
   const deliverable: Deliverable = {
@@ -92,6 +100,9 @@ export async function createDeliverable(input: DeliverableInput) {
 }
 
 export async function updateDeliverable(deliverableId: string, input: DeliverableInput) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.updateDeliverable(deliverableId, input);
+  }
   const deliverables = await readDeliverablesFile();
   const index = deliverables.findIndex((deliverable) => deliverable.id === deliverableId);
 
@@ -124,6 +135,9 @@ export async function deleteDeliverable(
   deliverableId: string,
   context: { projectId: string; packageId: string | null; gateId: string },
 ) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.deleteDeliverable(deliverableId, context);
+  }
   const deliverables = await readDeliverablesFile();
   const index = deliverables.findIndex(
     (deliverable) =>
@@ -143,6 +157,9 @@ export async function deleteDeliverable(
 }
 
 export async function removeCriterionFromDeliverables(criterionId: string) {
+  if (getOperationalDataBackend() === "postgres") {
+    return;
+  }
   const deliverables = await readDeliverablesFile();
   let changed = false;
 
@@ -165,6 +182,9 @@ export async function ensureDefaultDeliverables<StageId extends string>(context:
   gates: Gate<StageId>[];
   templates: GovernanceGateTemplate<StageId>[];
 }) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.ensureDefaultDeliverables(context);
+  }
   const deliverables = await readDeliverablesFile();
   let changed = false;
 
@@ -277,6 +297,9 @@ export async function ensureDefaultDeliverables<StageId extends string>(context:
 }
 
 export async function deleteDeliverablesForProject(projectId: string) {
+  if (getOperationalDataBackend() === "postgres") {
+    return;
+  }
   const deliverables = await readDeliverablesFile();
   const remainingDeliverables = deliverables.filter((deliverable) => deliverable.projectId !== projectId);
 
@@ -286,6 +309,9 @@ export async function deleteDeliverablesForProject(projectId: string) {
 }
 
 export async function deleteDeliverablesForPackage(projectId: string, packageId: string) {
+  if (getOperationalDataBackend() === "postgres") {
+    return;
+  }
   const deliverables = await readDeliverablesFile();
   const remainingDeliverables = deliverables.filter(
     (deliverable) => !(deliverable.projectId === projectId && deliverable.packageId === packageId),

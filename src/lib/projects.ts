@@ -7,6 +7,8 @@ import {
   removeCriterionFromDeliverables,
 } from "./deliverables";
 import {
+  claimGateReviewInvitationAttempt,
+  completeGateReviewInvitationAttempt,
   createGateReviewCycle,
   createGates,
   getGateSubmissionIssues,
@@ -21,10 +23,13 @@ import {
   type GateCriterionInput,
   type GateReviewResponseInput,
   type GateReviewResponseResult,
+  type GateReviewInvitationAttemptResult,
   type GateSubmissionResult,
   type GateWithdrawalResult,
 } from "./gates";
 import { getProjectGateTemplates } from "./governance-templates";
+import { getOperationalDataBackend } from "./operational/backend";
+import * as postgresOperational from "./operational/postgres";
 import {
   getGovernanceTierActionReferences,
   getGateActions,
@@ -155,6 +160,9 @@ async function writeProjectsFile(projects: Project[]) {
 }
 
 export async function getProjects() {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.getProjects();
+  }
   const projects = await readProjectsFile();
 
   for (const project of projects) {
@@ -165,6 +173,9 @@ export async function getProjects() {
 }
 
 export async function getProject(projectId: string) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.getProject(projectId);
+  }
   const projects = await readProjectsFile();
   const project = projects.find((project) => project.id === projectId) ?? null;
 
@@ -176,6 +187,9 @@ export async function getProject(projectId: string) {
 }
 
 export async function createProject(input: ProjectFormInput) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.createProject(input);
+  }
   return withGateWorkflowLock(async () => {
     const projects = await readProjectsFile();
     const now = new Date().toISOString();
@@ -197,6 +211,9 @@ export async function createProject(input: ProjectFormInput) {
 }
 
 export async function updateProject(projectId: string, input: ProjectFormInput) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.updateProject(projectId, input);
+  }
   return withGateWorkflowLock(async () => {
     const projects = await readProjectsFile();
     const index = projects.findIndex((project) => project.id === projectId);
@@ -233,6 +250,9 @@ export async function createProjectGovernanceTier(
   projectId: string,
   input: GovernanceTierInput,
 ) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.createProjectGovernanceTier(projectId, input);
+  }
   return withGateWorkflowLock(() =>
     withGovernanceTierWorkflowLock(() =>
       createProjectGovernanceTierWithoutWorkflowLock(projectId, input),
@@ -265,6 +285,13 @@ export async function updateProjectGovernanceTier(
   governanceTierId: string,
   input: GovernanceTierInput,
 ) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.updateProjectGovernanceTier(
+      projectId,
+      governanceTierId,
+      input,
+    );
+  }
   return withGateWorkflowLock(() =>
     withGovernanceTierWorkflowLock(() =>
       updateProjectGovernanceTierWithoutWorkflowLock(
@@ -301,6 +328,13 @@ export async function moveProjectGovernanceTier(
   governanceTierId: string,
   direction: "up" | "down",
 ) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.moveProjectGovernanceTier(
+      projectId,
+      governanceTierId,
+      direction,
+    );
+  }
   return withGateWorkflowLock(() =>
     withGovernanceTierWorkflowLock(() =>
       moveProjectGovernanceTierWithoutWorkflowLock(
@@ -345,6 +379,12 @@ export async function deleteProjectGovernanceTier(
   projectId: string,
   governanceTierId: string,
 ) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.deleteProjectGovernanceTier(
+      projectId,
+      governanceTierId,
+    );
+  }
   return withGateWorkflowLock(() =>
     withGovernanceTierWorkflowLock(() =>
       deleteProjectGovernanceTierWithoutWorkflowLock(
@@ -409,6 +449,9 @@ export async function submitProjectGateForApproval(
   projectId: string,
   gateId: string,
 ): Promise<GateSubmissionResult<Project> | null> {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.submitProjectGateForApproval(projectId, gateId);
+  }
   return withGateWorkflowLock(async () => {
     const projects = await readProjectsFile();
     const project = projects.find((candidate) => candidate.id === projectId);
@@ -469,6 +512,9 @@ export async function withdrawProjectGateSubmission(
   projectId: string,
   gateId: string,
 ): Promise<GateWithdrawalResult<Project> | null> {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.withdrawProjectGateSubmission(projectId, gateId);
+  }
   return withGateWorkflowLock(async () => {
     const projects = await readProjectsFile();
     const project = projects.find((candidate) => candidate.id === projectId);
@@ -508,6 +554,11 @@ export async function respondToProjectGateReview(
   gateId: string,
   input: GateReviewResponseInput,
 ): Promise<GateReviewResponseResult<Project> | null> {
+  if (getOperationalDataBackend() === "postgres") {
+    throw new Error(
+      "PostgreSQL Gate Review responses require authenticated approver assignment and are not enabled yet.",
+    );
+  }
   return withGateWorkflowLock(async () => {
     const projects = await readProjectsFile();
     const project = projects.find((candidate) => candidate.id === projectId);
@@ -572,7 +623,104 @@ export async function respondToProjectGateReview(
   });
 }
 
+export async function claimProjectGateReviewInvitation(
+  projectId: string,
+  gateId: string,
+  reviewCycleId: string,
+  gateApproverId: string,
+  allowFailedRetry = false,
+) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.claimProjectGateReviewInvitation(
+      projectId,
+      gateId,
+      reviewCycleId,
+      gateApproverId,
+      allowFailedRetry,
+    );
+  }
+  return withGateWorkflowLock(async () => {
+    const projects = await readProjectsFile();
+    const project = projects.find((candidate) => candidate.id === projectId);
+    const gate = project?.gates.find((candidate) => candidate.id === gateId);
+    const reviewCycle = gate?.reviewCycles.find(
+      (candidate) => candidate.id === reviewCycleId,
+    );
+    if (!project || !gate || !reviewCycle) return null;
+
+    const attemptId = randomUUID();
+    const claim = claimGateReviewInvitationAttempt(
+      reviewCycle,
+      gateApproverId,
+      {
+        attemptId,
+        idempotencyKey: `gate-review-invitation/${attemptId}`,
+        provider: "resend",
+        attemptedAt: new Date().toISOString(),
+        allowFailedRetry,
+      },
+    );
+    if (!claim) return null;
+
+    await writeProjectsFile(projects);
+    return {
+      project,
+      gate,
+      reviewCycle,
+      approver: claim.approver,
+      attempt: claim.attempt,
+    };
+  });
+}
+
+export async function completeProjectGateReviewInvitation(
+  projectId: string,
+  gateId: string,
+  reviewCycleId: string,
+  gateApproverId: string,
+  attemptId: string,
+  result: GateReviewInvitationAttemptResult,
+  claimToken?: string,
+) {
+  if (getOperationalDataBackend() === "postgres") {
+    if (!claimToken) return false;
+    return postgresOperational.completeProjectGateReviewInvitation(
+      projectId,
+      gateId,
+      reviewCycleId,
+      gateApproverId,
+      attemptId,
+      claimToken,
+      result,
+    );
+  }
+  return withGateWorkflowLock(async () => {
+    const projects = await readProjectsFile();
+    const project = projects.find((candidate) => candidate.id === projectId);
+    const gate = project?.gates.find((candidate) => candidate.id === gateId);
+    const reviewCycle = gate?.reviewCycles.find(
+      (candidate) => candidate.id === reviewCycleId,
+    );
+    if (!project || !reviewCycle) return false;
+
+    const completed = completeGateReviewInvitationAttempt(
+      reviewCycle,
+      gateApproverId,
+      attemptId,
+      result,
+      new Date().toISOString(),
+    );
+    if (!completed) return false;
+
+    await writeProjectsFile(projects);
+    return true;
+  });
+}
+
 export async function reopenProjectGate(projectId: string, gateId: string) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.reopenProjectGate(projectId, gateId);
+  }
   return withGateWorkflowLock(async () => {
     const projects = await readProjectsFile();
     const project = projects.find((candidate) => candidate.id === projectId);
@@ -593,6 +741,9 @@ export async function reopenProjectGate(projectId: string, gateId: string) {
 }
 
 export async function returnProjectToPreviousStage(projectId: string) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.returnProjectToPreviousStage(projectId);
+  }
   return withGateWorkflowLock(async () => {
     const projects = await readProjectsFile();
     const index = projects.findIndex((project) => project.id === projectId);
@@ -636,6 +787,9 @@ export async function createProjectGateApprover(
   gateId: string,
   input: GateApproverInput,
 ) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.createProjectGateApprover(projectId, gateId, input);
+  }
   return withGateWorkflowLock(async () => {
     const projects = await readProjectsFile();
     const project = projects.find((candidate) => candidate.id === projectId);
@@ -663,6 +817,14 @@ export async function updateProjectGateApprover(
   approverId: string,
   input: GateApproverInput,
 ) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.updateProjectGateApprover(
+      projectId,
+      gateId,
+      approverId,
+      input,
+    );
+  }
   return withGateWorkflowLock(async () => {
     const projects = await readProjectsFile();
     const project = projects.find((candidate) => candidate.id === projectId);
@@ -692,6 +854,13 @@ export async function deleteProjectGateApprover(
   gateId: string,
   approverId: string,
 ) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.deleteProjectGateApprover(
+      projectId,
+      gateId,
+      approverId,
+    );
+  }
   return withGateWorkflowLock(async () => {
     const projects = await readProjectsFile();
     const project = projects.find((candidate) => candidate.id === projectId);
@@ -716,6 +885,9 @@ export async function createProjectGateCriterion(
   gateId: string,
   input: GateCriterionInput,
 ) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.createProjectGateCriterion(projectId, gateId, input);
+  }
   return withGateWorkflowLock(async () => {
     const projects = await readProjectsFile();
     const projectIndex = projects.findIndex((project) => project.id === projectId);
@@ -749,6 +921,14 @@ export async function updateProjectGateCriterion(
   criterionId: string,
   input: GateCriterionInput,
 ) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.updateProjectGateCriterion(
+      projectId,
+      gateId,
+      criterionId,
+      input,
+    );
+  }
   return withGateWorkflowLock(async () => {
     const projects = await readProjectsFile();
     const projectIndex = projects.findIndex((project) => project.id === projectId);
@@ -780,6 +960,13 @@ export async function updateProjectGateCriterion(
 }
 
 export async function deleteProjectGateCriterion(projectId: string, gateId: string, criterionId: string) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.deleteProjectGateCriterion(
+      projectId,
+      gateId,
+      criterionId,
+    );
+  }
   return withGateWorkflowLock(async () => {
     const projects = await readProjectsFile();
     const projectIndex = projects.findIndex((project) => project.id === projectId);
@@ -811,6 +998,9 @@ export async function deleteProjectGateCriterion(projectId: string, gateId: stri
 }
 
 export async function deleteProject(projectId: string) {
+  if (getOperationalDataBackend() === "postgres") {
+    return postgresOperational.deleteProject(projectId);
+  }
   const projects = await readProjectsFile();
   const remainingProjects = projects.filter((project) => project.id !== projectId);
 

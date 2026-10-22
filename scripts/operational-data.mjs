@@ -444,7 +444,12 @@ export function historicalEvidenceFingerprint(source) {
 
 export async function getSourceControlState() {
   const { stdout: commitOutput } = await execFileAsync("git", ["rev-parse", "HEAD"]);
-  const { stdout: statusOutput } = await execFileAsync("git", ["status", "--porcelain=v1", "-z"]);
+  const { stdout: statusOutput } = await execFileAsync("git", [
+    "status",
+    "--porcelain=v1",
+    "--untracked-files=all",
+    "-z",
+  ]);
   const entries = statusOutput
     .split("\0")
     .filter(Boolean)

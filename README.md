@@ -18,7 +18,7 @@ Open [http://localhost:3000](http://localhost:3000) with your browser to see the
 
 ## Identity Foundation
 
-Authentication uses Better Auth, a single-tenant Microsoft Entra workforce application, and PostgreSQL. PostgreSQL currently stores only application Users, Microsoft provider identities, and sessions. Existing operational data remains in the ignored `.data` directory.
+Authentication uses Better Auth, a single-tenant Microsoft Entra workforce application, and PostgreSQL. Operational data uses the ignored `.data` directory by default; an explicitly selected PostgreSQL test mode is also available after migration and import.
 
 Create `.env.local` locally with restrictive permissions and edit it with your local editor. Do not send its contents through chat or commit it:
 
@@ -38,6 +38,7 @@ MICROSOFT_CLIENT_ID=
 MICROSOFT_CLIENT_SECRET=
 MICROSOFT_TENANT_ID=
 DATABASE_URL=
+OPERATIONAL_DATA_BACKEND=json
 ```
 
 These values are server-side. Never prefix them with `NEXT_PUBLIC_`, print them in logs, or commit `.env.local`.
@@ -66,7 +67,7 @@ UPDATE app_user SET status = 'disabled', updated_at = now() WHERE id = '<applica
 
 ## Operational PostgreSQL Foundation
 
-The operational PostgreSQL schema is migration-ready, but the application still reads and writes operational data in `.data/*.json`. Running these commands does not switch runtime persistence.
+Operational persistence defaults to `.data/*.json`. Migration and import commands do not switch the runtime backend automatically.
 
 Check migration status and apply pending migrations with a direct PostgreSQL connection when available. The migration runner uses `DATABASE_DIRECT_URL` first and falls back to `DATABASE_URL`:
 
@@ -101,6 +102,14 @@ npm run db:operational -- --validate --allow-runtime-projection --owner-map ./ow
 ```
 
 The importer rejects a database-name mismatch, a non-empty operational target, missing ownership, altered source data, and unapproved runtime normalization. Each run writes sanitized JSON and Markdown evidence to the ignored `.migration-reports/` directory.
+
+For isolated runtime verification against a migrated and imported database, set:
+
+```dotenv
+OPERATIONAL_DATA_BACKEND=postgres
+```
+
+Only the exact values `json` and `postgres` are accepted. PostgreSQL mode fails closed when migration `006_runtime_persistence_safety.sql` is absent; it never falls back to JSON or performs dual writes. Public Gate Review responses remain disabled in PostgreSQL mode until authenticated Approver assignment and project-level authorization are integrated. This switch is for explicit verification and is not a production activation procedure.
 
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 

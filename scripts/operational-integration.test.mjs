@@ -3,6 +3,7 @@ import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { registerHooks } from "node:module";
 import { Client } from "pg";
 import {
   OPERATIONAL_TABLES,
@@ -142,7 +143,749 @@ test("operational migrations and imports are transactional and repeatable", {
   assert.equal(await countEmptyJsonChangeArrays(databaseUrlA), 1);
 
   await verifyDatabaseConstraints(databaseUrlA);
+  await verifyDatabaseConstraints(databaseUrlB);
+  await verifyRuntimePersistence(databaseUrlA, source.data);
+  await clearDisposableOperationalData(databaseUrlA, databaseNameA);
+  await importOperationalRows({
+    connectionString: databaseUrlA,
+    expectedDatabase: databaseNameA,
+    databaseRole: importerRole,
+    rows,
+    importRecord,
+  });
+  const restoredValidationA = await validateImportedRows({
+    connectionString: databaseUrlA,
+    expectedDatabase: databaseNameA,
+    databaseRole: importerRole,
+    expectedRows: rows,
+  });
+  assert.equal(restoredValidationA.logicalFingerprint, fingerprint);
+  assert.deepEqual(restoredValidationA.counts, validationB.counts);
 });
+
+async function verifyRuntimePersistence(connectionString, source) {
+  process.env.DATABASE_URL = connectionString;
+  registerHooks({
+    resolve(specifier, context, nextResolve) {
+      if (specifier === "server-only") {
+        return { url: "data:text/javascript,export {}", shortCircuit: true };
+      }
+      try {
+        return nextResolve(specifier, context);
+      } catch (error) {
+        if (specifier.startsWith(".")) {
+          return nextResolve(`${specifier}.ts`, context);
+        }
+        throw error;
+      }
+    },
+  });
+  const runtime = await import("../src/lib/operational/postgres.ts");
+  const database = await import("../src/lib/database.ts");
+  const backend = await import("../src/lib/operational/backend.ts");
+  const projectFacade = await import("../src/lib/projects.ts");
+  const packageFacade = await import("../src/lib/packages.ts");
+  const deliverableFacade = await import("../src/lib/deliverables.ts");
+  const actionFacade = await import("../src/lib/project-actions.ts");
+  const previousBackend = process.env.OPERATIONAL_DATA_BACKEND;
+
+  try {
+    delete process.env.OPERATIONAL_DATA_BACKEND;
+    assert.equal(backend.getOperationalDataBackend(), "json");
+    process.env.OPERATIONAL_DATA_BACKEND = "unsupported";
+    assert.throws(() => backend.getOperationalDataBackend(), /must be exactly/);
+    process.env.OPERATIONAL_DATA_BACKEND = "postgres";
+
+    const expectedProjects = [...source.projects].sort((left, right) =>
+      right.updatedAt.localeCompare(left.updatedAt));
+    assert.deepEqual(await projectFacade.getProjects(), expectedProjects);
+    for (const project of source.projects) {
+      const expectedPackages = source.packages
+        .filter((projectPackage) => projectPackage.projectId === project.id)
+        .sort((left, right) => left.packageCode.localeCompare(right.packageCode));
+      const expectedActions = source.actionStore.actions
+        .filter((action) => action.projectId === project.id)
+        .sort((left, right) => left.sequence - right.sequence);
+      assert.deepEqual(await packageFacade.getPackages(project.id), expectedPackages);
+      assert.deepEqual(await actionFacade.getProjectActions(project.id), expectedActions);
+    }
+
+    const project = await projectFacade.createProject({
+      projectNumber: `runtime-${Date.now()}`,
+      name: "Runtime persistence verification",
+      description: "Disposable integration-test Project.",
+      projectManager: "Integration Test",
+      customer: "Test Customer",
+      reportsTo: "Test Sponsor",
+      siteLocation: "Test Site",
+      plannedStartDate: "2026-01-15",
+      plannedCompletionDate: "2026-12-15",
+      validationRequired: false,
+      currentStage: "initiation",
+    });
+    assert.equal(project.plannedStartDate, "2026-01-15");
+    assert.equal(project.plannedCompletionDate, "2026-12-15");
+
+    const updatedProject = await projectFacade.updateProject(project.id, {
+      projectNumber: project.projectNumber,
+      name: "Updated runtime persistence verification",
+      description: project.description,
+      projectManager: project.projectManager,
+      customer: project.customer,
+      reportsTo: project.reportsTo,
+      siteLocation: project.siteLocation,
+      plannedStartDate: project.plannedStartDate,
+      plannedCompletionDate: project.plannedCompletionDate,
+      validationRequired: project.validationRequired,
+      currentStage: "closure",
+    });
+    assert.equal(updatedProject?.name, "Updated runtime persistence verification");
+    assert.equal(updatedProject?.currentStage, "initiation");
+
+    const tiers = await Promise.all(
+      ["Execution", "Steering", "Sponsor", "Board"].map((name) =>
+        runtime.createProjectGovernanceTier(project.id, {
+          name,
+          description: `${name} tier`,
+        })),
+    );
+    assert.deepEqual(
+      tiers.map((tier) => tier?.sequence).sort((left, right) => left - right),
+      [1, 2, 3, 4],
+    );
+    const executionTier = tiers.find((tier) => tier?.name === "Execution");
+    const boardTier = tiers.find((tier) => tier?.name === "Board");
+    assert.ok(executionTier);
+    assert.ok(boardTier);
+    assert.equal(
+      (await projectFacade.updateProjectGovernanceTier(
+        project.id,
+        executionTier.id,
+        { name: "Delivery", description: "Updated tier" },
+      ))?.name,
+      "Delivery",
+    );
+    assert.equal(
+      (await projectFacade.moveProjectGovernanceTier(
+        project.id,
+        boardTier.id,
+        "up",
+      ))?.sequence,
+      Math.max(1, boardTier.sequence - 1),
+    );
+    assert.deepEqual(
+      await projectFacade.deleteProjectGovernanceTier(project.id, boardTier.id),
+      { outcome: "deleted" },
+    );
+
+    const packageInput = {
+      packageCode: "PKG-RACE",
+      packageName: "Concurrent Package",
+      description: "Concurrency check.",
+      packageOwner: "Integration Test",
+      executionModel: "internal",
+      currentStage: "definition",
+      status: "not_assessed",
+      targetDeliveryDate: "2026-09-30",
+    };
+    const packageResults = await Promise.allSettled([
+      packageFacade.createPackage(project.id, packageInput),
+      packageFacade.createPackage(project.id, packageInput),
+    ]);
+    assert.equal(
+      packageResults.filter((result) => result.status === "fulfilled").length,
+      1,
+    );
+    assert.equal(
+      packageResults.filter((result) => result.status === "rejected").length,
+      1,
+    );
+    const projectPackage = (await packageFacade.getPackages(project.id))[0];
+    assert.equal(projectPackage.targetDeliveryDate, "2026-09-30");
+    const updatedPackage = await packageFacade.updatePackage(
+      project.id,
+      projectPackage.id,
+      {
+        ...packageInput,
+        packageName: "Updated Concurrent Package",
+        currentStage: "closure",
+      },
+    );
+    assert.equal(updatedPackage?.packageName, "Updated Concurrent Package");
+    assert.equal(updatedPackage?.currentStage, "definition");
+
+    const actionActor = { userId: null, displayName: "Integration Test" };
+    const actions = await Promise.all(
+      Array.from({ length: 6 }, (_, index) =>
+        actionFacade.createManualProjectAction(
+          project.id,
+          {
+            description: `Concurrent Action ${index + 1}`,
+            assignee: "Integration Test",
+            dueDate: "2026-06-30",
+            status: "new",
+            priority: "medium",
+            packageIds: [],
+            governanceTierId: null,
+            gateId: null,
+            initialUpdate: null,
+          },
+          actionActor,
+        )),
+    );
+    assert.deepEqual(
+      actions.map((action) => action.sequence).sort((left, right) => left - right),
+      [1, 2, 3, 4, 5, 6],
+    );
+    const actionWithTier = await actionFacade.updateProjectAction(
+      project.id,
+      actions[1].id,
+      {
+        description: actions[1].description,
+        assignee: actions[1].assignee,
+        dueDate: actions[1].dueDate,
+        status: actions[1].status,
+        priority: actions[1].priority,
+        packageIds: actions[1].packageIds,
+        governanceTierId: executionTier.id,
+        gateId: actions[1].gateId,
+        initialUpdate: null,
+      },
+      actionActor,
+    );
+    assert.equal(actionWithTier.governanceTierId, executionTier.id);
+    await actionFacade.updateProjectAction(
+      project.id,
+      actions[1].id,
+      {
+        description: actionWithTier.description,
+        assignee: actionWithTier.assignee,
+        dueDate: actionWithTier.dueDate,
+        status: actionWithTier.status,
+        priority: actionWithTier.priority,
+        packageIds: actionWithTier.packageIds,
+        governanceTierId: null,
+        gateId: actionWithTier.gateId,
+        initialUpdate: null,
+      },
+      actionActor,
+    );
+    const tierReferences = await actionFacade.getGovernanceTierActionReferences(
+      project.id,
+      executionTier.id,
+    );
+    assert.deepEqual(tierReferences.currentActionIds, []);
+    assert.deepEqual(tierReferences.historicalActionIds, [actions[1].id]);
+    assert.equal(
+      (await projectFacade.deleteProjectGovernanceTier(
+        project.id,
+        executionTier.id,
+      ))?.outcome,
+      "referenced",
+    );
+
+    const actionWithComment = await actionFacade.addProjectActionUpdate(
+      project.id,
+      actions[0].id,
+      "Runtime comment",
+      actionActor,
+    );
+    assert.equal(actionWithComment.updates.at(-1)?.text, "Runtime comment");
+    const closedAction = await actionFacade.closeProjectAction(
+      project.id,
+      actions[0].id,
+      actionActor,
+      "Runtime close",
+    );
+    assert.equal(closedAction.status, "closed");
+    assert.ok(closedAction.closingDate);
+    const reopenedAction = await actionFacade.reopenProjectAction(
+      project.id,
+      actions[0].id,
+      "in_progress",
+      actionActor,
+      "Runtime reopen",
+    );
+    assert.equal(reopenedAction.status, "in_progress");
+    assert.equal(reopenedAction.closingDate, null);
+    const actionBeforeRollback = await actionFacade.getProjectAction(project.id, actions[0].id);
+    await assert.rejects(
+      () => actionFacade.updateProjectAction(
+        project.id,
+        actions[0].id,
+        {
+          description: "This update must roll back.",
+          assignee: "Integration Test",
+          dueDate: "2026-07-01",
+          status: "new",
+          priority: "high",
+          packageIds: ["missing-package"],
+          governanceTierId: null,
+          gateId: null,
+          initialUpdate: "Must not persist.",
+        },
+        actionActor,
+      ),
+      /selected Packages are invalid/,
+    );
+    assert.deepEqual(
+      await actionFacade.getProjectAction(project.id, actions[0].id),
+      actionBeforeRollback,
+    );
+    assert.deepEqual(
+      await actionFacade.deleteProjectAction(project.id, actions[5].id),
+      { deleted: true },
+    );
+    assert.equal(await actionFacade.getProjectAction(project.id, actions[5].id), null);
+
+    const currentProject = await projectFacade.getProject(project.id);
+    const currentGate = currentProject.gates.find(
+      (gate) => gate.stageId === currentProject.currentStage,
+    );
+    assert.ok(currentGate);
+    const customCriterion = await projectFacade.createProjectGateCriterion(
+      project.id,
+      currentGate.id,
+      { description: "Runtime criterion", status: "pending" },
+    );
+    assert.ok(customCriterion);
+    assert.equal(
+      (await projectFacade.updateProjectGateCriterion(
+        project.id,
+        currentGate.id,
+        customCriterion.id,
+        { description: "Updated runtime criterion", status: "completed" },
+      ))?.description,
+      "Updated runtime criterion",
+    );
+    const customDeliverable = await deliverableFacade.createDeliverable({
+      projectId: project.id,
+      packageId: null,
+      gateId: currentGate.id,
+      criterionIds: [customCriterion.id],
+      title: "Runtime Deliverable",
+      description: "Runtime deliverable regression.",
+      status: "in_progress",
+      stageId: currentGate.stageId,
+      scopeLevel: "project",
+    });
+    assert.deepEqual(customDeliverable.criterionIds, [customCriterion.id]);
+    assert.equal(
+      (await deliverableFacade.updateDeliverable(customDeliverable.id, {
+        ...customDeliverable,
+        criterionIds: [customCriterion.id],
+        title: "Updated Runtime Deliverable",
+        status: "completed",
+      }))?.title,
+      "Updated Runtime Deliverable",
+    );
+    assert.equal(
+      await projectFacade.deleteProjectGateCriterion(
+        project.id,
+        currentGate.id,
+        customCriterion.id,
+      ),
+      true,
+    );
+    assert.deepEqual(
+      (await deliverableFacade.getGateDeliverables(
+        project.id,
+        null,
+        currentGate.id,
+      )).find((deliverable) => deliverable.id === customDeliverable.id)?.criterionIds,
+      [],
+    );
+    assert.equal(
+      await deliverableFacade.deleteDeliverable(customDeliverable.id, {
+        projectId: project.id,
+        packageId: null,
+        gateId: currentGate.id,
+      }),
+      true,
+    );
+    const gateAction = await actionFacade.createGateProjectAction(
+      project.id,
+      currentGate.id,
+      [],
+      false,
+      {
+        description: "Frozen Gate Action",
+        assignee: "Integration Test",
+        dueDate: "2026-08-01",
+        priority: "high",
+        initialUpdate: null,
+      },
+      actionActor,
+    );
+    for (const criterion of currentGate.criteria) {
+      const updated = await projectFacade.updateProjectGateCriterion(
+        project.id,
+        currentGate.id,
+        criterion.id,
+        { description: criterion.description, status: "completed" },
+      );
+      assert.ok(updated);
+    }
+    const deliverables = await deliverableFacade.getGateDeliverables(
+      project.id,
+      null,
+      currentGate.id,
+    );
+    for (const deliverable of deliverables) {
+      const updated = await deliverableFacade.updateDeliverable(deliverable.id, {
+        projectId: project.id,
+        packageId: null,
+        gateId: currentGate.id,
+        criterionIds: deliverable.criterionIds,
+        title: deliverable.title,
+        description: deliverable.description,
+        status: "completed",
+        stageId: deliverable.stageId,
+        scopeLevel: "project",
+      });
+      assert.ok(updated);
+    }
+    const approver = await projectFacade.createProjectGateApprover(
+      project.id,
+      currentGate.id,
+      {
+        name: "Runtime Approver",
+        email: "runtime-approver@example.invalid",
+        roleFunction: "Project Sponsor",
+        approvalRole: "Approver",
+        approvalLevel: 1,
+      },
+    );
+    assert.ok(approver);
+    assert.equal(
+      (await projectFacade.updateProjectGateApprover(
+        project.id,
+        currentGate.id,
+        approver.id,
+        {
+          name: "Updated Runtime Approver",
+          email: approver.email,
+          roleFunction: approver.roleFunction,
+          approvalRole: approver.approvalRole,
+          approvalLevel: approver.approvalLevel,
+        },
+      ))?.name,
+      "Updated Runtime Approver",
+    );
+    const temporaryApprover = await projectFacade.createProjectGateApprover(
+      project.id,
+      currentGate.id,
+      {
+        name: "Temporary Approver",
+        email: "temporary-approver@example.invalid",
+        roleFunction: "Test",
+        approvalRole: "Test",
+        approvalLevel: 2,
+      },
+    );
+    assert.ok(temporaryApprover);
+    assert.equal(
+      await projectFacade.deleteProjectGateApprover(
+        project.id,
+        currentGate.id,
+        temporaryApprover.id,
+      ),
+      true,
+    );
+
+    const submissions = await Promise.all([
+      projectFacade.submitProjectGateForApproval(project.id, currentGate.id),
+      projectFacade.submitProjectGateForApproval(project.id, currentGate.id),
+    ]);
+    const submitted = submissions.find((result) => result?.outcome === "submitted");
+    assert.ok(submitted);
+    assert.equal(
+      submissions.filter((result) => result?.outcome === "submitted").length,
+      1,
+    );
+    const cycle = submitted.reviewCycle;
+    assert.equal(cycle.cycleNumber, 1);
+    assert.equal(cycle.frozenEvidence.acceptedActions[0].actionId, gateAction.id);
+
+    const protectedDeletion = await actionFacade.deleteProjectAction(project.id, gateAction.id);
+    assert.equal(protectedDeletion.deleted, false);
+    assert.match(protectedDeletion.reason, /active Review Cycle/);
+
+    const claims = await Promise.all([
+      projectFacade.claimProjectGateReviewInvitation(
+        project.id,
+        currentGate.id,
+        cycle.id,
+        approver.id,
+      ),
+      projectFacade.claimProjectGateReviewInvitation(
+        project.id,
+        currentGate.id,
+        cycle.id,
+        approver.id,
+      ),
+    ]);
+    const claimed = claims.find(Boolean);
+    assert.ok(claimed?.claimToken);
+    assert.equal(claims.filter(Boolean).length, 1);
+    assert.equal(
+      await projectFacade.completeProjectGateReviewInvitation(
+        project.id,
+        currentGate.id,
+        cycle.id,
+        approver.id,
+        claimed.attempt.id,
+        { status: "sent", providerMessageId: "runtime-invalid" },
+        "invalid-claim-token",
+      ),
+      false,
+    );
+    assert.equal(
+      await projectFacade.completeProjectGateReviewInvitation(
+        project.id,
+        currentGate.id,
+        cycle.id,
+        approver.id,
+        claimed.attempt.id,
+        { status: "sent", providerMessageId: `runtime-${claimed.attempt.id}` },
+        claimed.claimToken,
+      ),
+      true,
+    );
+    assert.deepEqual(
+      await runtime.internalRecordIdentityBoundGateReviewResponse({
+        projectId: project.id,
+        packageId: null,
+        gateId: currentGate.id,
+        reviewCycleId: cycle.id,
+        actorUserId: "00000000-0000-4000-8000-000000000000",
+        outcome: "approved",
+        comment: "Must fail closed.",
+      }),
+      { outcome: "approver_not_found" },
+    );
+    await assert.rejects(
+      () => projectFacade.respondToProjectGateReview(
+        project.id,
+        currentGate.id,
+        {
+          reviewCycleId: cycle.id,
+          gateApproverId: approver.id,
+          outcome: "approved",
+          comment: "Must remain disabled.",
+        },
+      ),
+      /authenticated approver assignment/,
+    );
+
+    const withdrawal = await projectFacade.withdrawProjectGateSubmission(
+      project.id,
+      currentGate.id,
+    );
+    assert.equal(withdrawal?.outcome, "withdrawn");
+    const resubmission = await projectFacade.submitProjectGateForApproval(
+      project.id,
+      currentGate.id,
+    );
+    assert.equal(resubmission?.outcome, "submitted");
+    assert.equal(resubmission.reviewCycle.cycleNumber, 2);
+    assert.equal(resubmission.reviewCycle.previousCycleId, cycle.id);
+
+    const packageBeforeSubmission = await packageFacade.getPackage(
+      project.id,
+      projectPackage.id,
+    );
+    const packageGate = packageBeforeSubmission?.gates.find(
+      (gate) => gate.stageId === packageBeforeSubmission.currentStage,
+    );
+    assert.ok(packageGate);
+    for (const criterion of packageGate.criteria) {
+      assert.ok(await packageFacade.updatePackageGateCriterion(
+        project.id,
+        projectPackage.id,
+        packageGate.id,
+        criterion.id,
+        { description: criterion.description, status: "completed" },
+      ));
+    }
+    for (const deliverable of await deliverableFacade.getGateDeliverables(
+      project.id,
+      projectPackage.id,
+      packageGate.id,
+    )) {
+      assert.ok(await deliverableFacade.updateDeliverable(deliverable.id, {
+        projectId: project.id,
+        packageId: projectPackage.id,
+        gateId: packageGate.id,
+        criterionIds: deliverable.criterionIds,
+        title: deliverable.title,
+        description: deliverable.description,
+        status: "completed",
+        stageId: deliverable.stageId,
+        scopeLevel: "package",
+      }));
+    }
+    const packageApprover = await packageFacade.createPackageGateApprover(
+      project.id,
+      projectPackage.id,
+      packageGate.id,
+      {
+        name: "Package Approver",
+        email: "package-approver@example.invalid",
+        roleFunction: "Package Sponsor",
+        approvalRole: "Approver",
+        approvalLevel: 1,
+      },
+    );
+    assert.ok(packageApprover);
+    const packageSubmissions = await Promise.all([
+      packageFacade.submitPackageGateForApproval(
+        project.id,
+        projectPackage.id,
+        packageGate.id,
+      ),
+      packageFacade.submitPackageGateForApproval(
+        project.id,
+        projectPackage.id,
+        packageGate.id,
+      ),
+    ]);
+    const packageSubmission = packageSubmissions.find(
+      (result) => result?.outcome === "submitted",
+    );
+    assert.ok(packageSubmission);
+    assert.equal(
+      packageSubmissions.filter((result) => result?.outcome === "submitted").length,
+      1,
+    );
+    await assert.rejects(
+      () => packageFacade.respondToPackageGateReview(
+        project.id,
+        projectPackage.id,
+        packageGate.id,
+        {
+          reviewCycleId: packageSubmission.reviewCycle.id,
+          gateApproverId: packageApprover.id,
+          outcome: "approved",
+          comment: "Must remain disabled.",
+        },
+      ),
+      /authenticated approver assignment/,
+    );
+    const packageClaim = await packageFacade.claimPackageGateReviewInvitation(
+      project.id,
+      projectPackage.id,
+      packageGate.id,
+      packageSubmission.reviewCycle.id,
+      packageApprover.id,
+    );
+    assert.ok(packageClaim?.claimToken);
+    assert.equal(
+      await packageFacade.completePackageGateReviewInvitation(
+        project.id,
+        projectPackage.id,
+        packageGate.id,
+        packageSubmission.reviewCycle.id,
+        packageApprover.id,
+        packageClaim.attempt.id,
+        {
+          status: "failed",
+          error: { code: "runtime_failure", message: "Expected runtime failure." },
+        },
+        packageClaim.claimToken,
+      ),
+      true,
+    );
+    const packageRetries = await Promise.all([
+      packageFacade.claimPackageGateReviewInvitation(
+        project.id,
+        projectPackage.id,
+        packageGate.id,
+        packageSubmission.reviewCycle.id,
+        packageApprover.id,
+        true,
+      ),
+      packageFacade.claimPackageGateReviewInvitation(
+        project.id,
+        projectPackage.id,
+        packageGate.id,
+        packageSubmission.reviewCycle.id,
+        packageApprover.id,
+        true,
+      ),
+    ]);
+    assert.equal(packageRetries.filter(Boolean).length, 1);
+    const packageRetry = packageRetries.find(Boolean);
+    assert.ok(packageRetry?.claimToken);
+    assert.equal(
+      await packageFacade.completePackageGateReviewInvitation(
+        project.id,
+        projectPackage.id,
+        packageGate.id,
+        packageSubmission.reviewCycle.id,
+        packageApprover.id,
+        packageRetry.attempt.id,
+        { status: "sent", providerMessageId: `runtime-${packageRetry.attempt.id}` },
+        packageRetry.claimToken,
+      ),
+      true,
+    );
+    assert.equal(
+      (await packageFacade.withdrawPackageGateSubmission(
+        project.id,
+        projectPackage.id,
+        packageGate.id,
+      ))?.outcome,
+      "withdrawn",
+    );
+    assert.equal(await packageFacade.deletePackage(project.id, projectPackage.id), true);
+    assert.equal(await packageFacade.getPackage(project.id, projectPackage.id), null);
+    assert.equal(
+      (await runtime.getArchivedPackage(project.id, projectPackage.id))?.id,
+      projectPackage.id,
+    );
+
+    const disposableProject = await projectFacade.createProject({
+      projectNumber: `runtime-delete-${Date.now()}`,
+      name: "Hard deletion verification",
+      description: "No retained history.",
+      projectManager: "Integration Test",
+      customer: "Test Customer",
+      reportsTo: "Test Sponsor",
+      siteLocation: "Test Site",
+      plannedStartDate: "",
+      plannedCompletionDate: "",
+      validationRequired: false,
+      currentStage: "initiation",
+    });
+    const disposablePackage = await packageFacade.createPackage(
+      disposableProject.id,
+      { ...packageInput, packageCode: "PKG-DELETE" },
+    );
+    assert.ok(disposablePackage);
+    assert.equal(
+      await packageFacade.deletePackage(disposableProject.id, disposablePackage.id),
+      true,
+    );
+    assert.equal(
+      await runtime.getArchivedPackage(disposableProject.id, disposablePackage.id),
+      null,
+    );
+    assert.equal(await projectFacade.deleteProject(disposableProject.id), true);
+    assert.equal(await runtime.getArchivedProject(disposableProject.id), null);
+
+    assert.equal(await projectFacade.deleteProject(project.id), true);
+    assert.equal(await projectFacade.getProject(project.id), null);
+    assert.equal((await runtime.getArchivedProject(project.id))?.id, project.id);
+  } finally {
+    if (previousBackend == null) {
+      delete process.env.OPERATIONAL_DATA_BACKEND;
+    } else {
+      process.env.OPERATIONAL_DATA_BACKEND = previousBackend;
+    }
+    await database.getOperationalPool().end();
+  }
+}
 
 async function verifyAdvisoryLock(connectionString, migrationsDirectory, logger) {
   const client = new Client({ connectionString });
@@ -191,13 +934,13 @@ async function verifyTransactionalMigration(connectionString, migrationsDirector
   try {
     await cp(migrationsDirectory, temporaryDirectory, { recursive: true });
     await writeFile(
-      path.join(temporaryDirectory, "006_transaction_rollback_test.sql"),
+      path.join(temporaryDirectory, "007_transaction_rollback_test.sql"),
       "CREATE TABLE migration_rollback_probe (id integer);\nSELECT * FROM missing_migration_relation;\n",
       "utf8",
     );
     await assert.rejects(
       () => runMigrations({ connectionString, migrationsDirectory: temporaryDirectory, logger }),
-      /Failed to apply 006_transaction_rollback_test.sql/,
+      /Failed to apply 007_transaction_rollback_test.sql/,
     );
     const client = new Client({ connectionString });
     await client.connect();
@@ -207,7 +950,7 @@ async function verifyTransactionalMigration(connectionString, migrationsDirector
       );
       assert.equal(result.rows[0].relation, null);
       const ledger = await client.query(
-        "SELECT 1 FROM identity_schema_migration WHERE name = '006_transaction_rollback_test.sql'",
+        "SELECT 1 FROM identity_schema_migration WHERE name = '007_transaction_rollback_test.sql'",
       );
       assert.equal(ledger.rowCount, 0);
     } finally {
@@ -263,6 +1006,9 @@ async function verifyDatabaseConstraints(connectionString) {
     /immutable/i);
   await expectDatabaseError(connectionString,
     "UPDATE gate_review_invitation_attempt SET error_message = error_message WHERE status <> 'dispatching'",
+    /immutable/i);
+  await expectDatabaseError(connectionString,
+    "DELETE FROM project_action_update WHERE action_id = (SELECT id FROM project_action ORDER BY sequence LIMIT 1)",
     /immutable/i);
   await expectDatabaseError(
     connectionString,
