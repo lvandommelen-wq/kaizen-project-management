@@ -12,6 +12,7 @@
 
 # testing
 /coverage
+/.migration-reports/
 
 # next.js
 /.next/

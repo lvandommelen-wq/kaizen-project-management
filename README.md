@@ -42,10 +42,10 @@ DATABASE_URL=
 
 These values are server-side. Never prefix them with `NEXT_PUBLIC_`, print them in logs, or commit `.env.local`.
 
-After creating an empty PostgreSQL database and setting `DATABASE_URL`, apply the identity schema:
+After creating an empty PostgreSQL database and setting `DATABASE_URL`, apply the database migrations:
 
 ```bash
-npm run db:identity:migrate
+npm run db:migrate
 ```
 
 The development Entra App Registration must use the Web redirect URI:
@@ -63,6 +63,44 @@ Operational routes under `/projects` require an active internal User. Authentica
 ```sql
 UPDATE app_user SET status = 'disabled', updated_at = now() WHERE id = '<application-user-uuid>';
 ```
+
+## Operational PostgreSQL Foundation
+
+The operational PostgreSQL schema is migration-ready, but the application still reads and writes operational data in `.data/*.json`. Running these commands does not switch runtime persistence.
+
+Check migration status and apply pending migrations with a direct PostgreSQL connection when available. The migration runner uses `DATABASE_DIRECT_URL` first and falls back to `DATABASE_URL`:
+
+```bash
+npm run db:migrate:status
+npm run db:migrate
+```
+
+Inventory and validate the JSON source without writing to PostgreSQL:
+
+```bash
+npm run db:operational -- --dry-run --allow-runtime-projection --owner-map ./owners.json
+```
+
+The owner map must identify one existing active internal application User for every Project:
+
+```json
+{
+  "owners": [
+    { "projectId": "project-id", "userId": "application-user-uuid" }
+  ]
+}
+```
+
+For an isolated test import only, the owner requirement can be disabled with `--allow-missing-owner-map`. Do not use that option for a production cutover.
+
+Import into an empty migrated database after setting a direct `OPERATIONAL_DATABASE_URL` and the exact database name in `OPERATIONAL_EXPECTED_DATABASE`. `OPERATIONAL_DATABASE_ROLE` is optional and can restrict the import session to an already-granted role:
+
+```bash
+npm run db:operational -- --import --allow-runtime-projection --owner-map ./owners.json
+npm run db:operational -- --validate --allow-runtime-projection --owner-map ./owners.json
+```
+
+The importer rejects a database-name mismatch, a non-empty operational target, missing ownership, altered source data, and unapproved runtime normalization. Each run writes sanitized JSON and Markdown evidence to the ignored `.migration-reports/` directory.
 
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 
