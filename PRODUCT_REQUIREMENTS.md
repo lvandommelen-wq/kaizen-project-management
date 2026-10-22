@@ -465,6 +465,8 @@ Typical Project-level Deliverables/information:
 * Validation Strategy / Plan where applicable
 * Initial Requirements Traceability Matrix where applicable
 * initial internal Resource demand where relevant
+* **Project Maintenance & Reliability Strategy** — Defines the project-wide reliability methodology, applicable criticality assessments, CMMS/EAM standards, maintenance responsibilities, supplier requirements and operational handover expectations.
+* **Production Integration & Master Data Strategy** — Defines the system-agnostic ERP/MES integration architecture and system responsibilities; production master-data ownership; production order handling; production BOM and recipe requirements; material consumption and inventory reporting; batch/lot traceability requirements; interfaces between production equipment, automation, MES and ERP; and master-data preparation and handover responsibilities.
 
 Packages should normally be identified and created during this Stage.
 
@@ -488,6 +490,11 @@ Original Baseline
   = Current Approved State
 
 This principle should apply to Scope, Cost and Schedule.
+
+Additional Gate Criterion:
+
+* Project Maintenance & Reliability Strategy is defined and approved where applicable.
+* Production integration architecture, master-data responsibilities and applicable ERP/MES requirements are defined.
 
 ---
 
@@ -524,9 +531,20 @@ Typical Project-level activities:
 * integration planning;
 * overall Actions and Decisions.
 
+Project-level Deliverables:
+
+* **Maintenance & Reliability Readiness Overview** — Consolidates maintenance readiness across applicable Packages, including maintenance strategy, CMMS integration, spare parts, support and training.
+* **Production Readiness & Integration Overview** — Consolidates production integration readiness across applicable Packages, including production master-data availability; production interface verification; production order and material-consumption functionality; traceability readiness; operational procedures and training; outstanding production integration issues; and acceptance by the receiving Production organization.
+
 ### Gate: Project Delivery Complete
 
 This Gate confirms that the delivery activities required before Validation or Closure are sufficiently complete.
+
+Additional Gate Criterion:
+
+* Maintenance & Reliability readiness has been assessed across applicable Packages, and outstanding critical items are resolved or formally accepted.
+
+The Production Readiness & Integration Overview should provide evidence for the existing Project Delivery Complete Criteria covering cross-Package integration, Delivery verification evidence and training/handover to Operations. No additional Production-specific Criterion is required at this Gate. Final Production acceptance remains part of the existing Project Handover / Acceptance process.
 
 ---
 
@@ -684,7 +702,7 @@ An External Package is executed primarily by an external supplier/OEM contracted
 External Packages may have:
 
 * multiple candidate suppliers during Tendering;
-* a preferred supplier following Execution Strategy Selection;
+* a preferred supplier following Execution Model & Technical Selection;
 * a maximum of one awarded supplier after Contract Award.
 
 If multiple external suppliers are directly contracted by the customer for materially different Scopes, separate Packages should normally be created.
@@ -852,6 +870,8 @@ Typical Deliverables/information:
 * Validation support requirements where applicable
 * preliminary execution strategy
 * preliminary internal Resource requirements where relevant
+* **Maintenance & Reliability Requirements** — Defines maintainability requirements, applicable ACA/FLOCCA/FMECA/RCM2 analysis depth, CMMS/EAM master data, spare parts, training and support requirements.
+* **Production Integration Requirements** — Defines the Package-specific production integration requirements, including production order handling; production BOM/recipe requirements; material identification and consumption; batch/lot traceability; equipment-to-MES/ERP interfaces; production confirmations; relevant automation and IT/OT interfaces; and production master-data responsibilities where applicable.
 
 ### Technical Specification
 
@@ -867,9 +887,14 @@ General principle:
 
 > Skipping a Stage must not automatically remove a Deliverable that remains necessary for proper Project execution.
 
-### Gate: Definition Complete / Ready for Execution Strategy
+### Gate: Definition Complete
 
 The Gate should determine whether the Package is sufficiently defined to proceed.
+
+Additional Gate Criterion:
+
+* Maintenance & Reliability requirements, responsibilities and required analysis depth are sufficiently defined.
+* Production integration requirements, interfaces and applicable master-data requirements are sufficiently defined.
 
 Possible outcomes may include:
 
@@ -902,14 +927,19 @@ Typical Deliverables/information may include:
 * Schedule comparison
 * technical recommendation
 * make-or-buy evaluation where applicable
+* **Maintenance & Reliability Evaluation** — Evaluates external supplier or internal execution proposals regarding maintainability, lifecycle cost, spare parts, maintenance support and training.
 
 Multiple external supplier candidates may be associated with the Package during this Stage.
 
 Where Internal execution remains an option, the Internal execution proposal should be capable of being considered alongside external alternatives.
 
-### Gate: Execution Strategy Selection
+### Gate: Execution Model & Technical Selection
 
 This Gate determines how the Package will be executed.
+
+Existing technical compliance, Cost, Schedule, Risk, Interface and execution-model Criteria should be used to assess the Maintenance & Reliability Evaluation without adding a separate maintenance-specific Gate Criterion.
+
+Production integration compliance should be evaluated within the existing Technical Evaluation / TECO. Tendering does not introduce an additional Production integration Deliverable.
 
 The approved Execution Model must be:
 
@@ -949,6 +979,10 @@ Typical activities/Deliverables:
 * Contractual Scope
 * Contractual Schedule
 * Final commercial value
+
+Relevant maintenance obligations identified through the approved requirements and evaluation should be incorporated into the existing contractual Deliverables. Procurement does not introduce an additional Maintenance & Reliability Deliverable.
+
+Relevant production integration obligations should be incorporated into the existing Contractual Scope and Technical Specification. Procurement does not introduce an additional Production integration Deliverable.
 
 ### Gate: Contract Award
 
@@ -1024,6 +1058,25 @@ Typical activities may include:
 * SAT / Verification where applicable
 * Handover
 
+### Maintenance & Reliability Deliverables
+
+The following default Package-level Deliverables apply at Package Handover / Execution Complete, subject to Package applicability:
+
+* **Maintenance Strategy & Reliability Assessment** — Approved reactive, preventive, predictive/condition-based and failure-finding maintenance strategy as applicable, supported by ACA, FLOCCA, FMECA/RCM2 or other required analyses.
+* **CMMS / EAM Master Data Handover** — Asset hierarchy, functional locations, equipment records, BOMs, task lists, maintenance plans and counters where applicable, including verification of correct CMMS/EAM implementation.
+* **Maintenance Support & Spare Parts Plan** — Critical spare-parts assessment and availability, OEM/SLA support arrangements and L1 operator / L2 internal maintenance / L3 OEM intervention and escalation matrix.
+* **Training & Qualification Matrix** — Operator and maintenance competency requirements, training completion and qualification evidence, including intervention authorization where applicable.
+
+### Production Integration Deliverables
+
+The following default Package-level Deliverables apply at Package Handover / Execution Complete, subject to Package applicability:
+
+* **Production Master Data Handover** — Covers applicable production BOMs, work centers, routings, recipes, material definitions, production versions, equipment/system references and other required ERP/MES master data, including SAP PP master data where applicable. Confirms that required data has been prepared, transferred and verified in the responsible system.
+* **Production Interface & Integration Verification** — Demonstrates that applicable production interfaces and data exchanges have been tested, including where relevant production order transfer; recipe/parameter transfer; material identification and consumption; production confirmations; batch/lot traceability; machine/MES/ERP communication; and interface failure/recovery scenarios.
+* **Production Operational Readiness & Training** — Demonstrates that the receiving Production organization is prepared to operate the Package, covering applicable operating procedures; operator training and required qualifications; production master-data readiness; operational responsibilities; outstanding production issues; and formal operational acceptance.
+
+Production Master Data Handover confirms that required data has been prepared, transferred and verified in the responsible system. Production Interface & Integration Verification separately confirms that the implemented system interfaces and data exchanges operate as required. Existing FAT/SAT and Verification documentation should provide supporting evidence where appropriate; duplicate test protocols should not be created.
+
 The exact Execution activities and Deliverables depend on Package type and should not be rigidly hard-coded based only on Internal/External classification.
 
 ### Gate: Package Handover / Execution Complete
@@ -1033,6 +1086,11 @@ This Gate confirms that the Package has been executed sufficiently for handover 
 For external equipment Packages this may correspond to Equipment Handover.
 
 For Internal Packages, terminology and Criteria may differ depending on Package type.
+
+Additional Gate Criterion:
+
+* Maintenance readiness is demonstrated, including approved maintenance strategy, verified CMMS/EAM integration, critical spare-parts readiness, defined support responsibilities and required personnel qualifications.
+* Required production master data is available and verified, production interfaces have been tested, and the receiving Production organization is ready to operate the equipment.
 
 ---
 
@@ -1054,6 +1112,10 @@ External Packages may additionally include:
 * Final Acceptance;
 * warranty information;
 * supplier performance evaluation.
+
+No additional Maintenance & Reliability Deliverable is required at Package Closure. Final maintenance acceptance and outstanding maintenance items should be documented through the existing Package Closure Deliverables.
+
+No additional Production integration Deliverable is required at Package Closure. Final Production acceptance and remaining production integration Actions should be documented through the existing Package Closure Deliverables.
 
 ### Gate: Package Closed
 
@@ -1127,6 +1189,12 @@ Deliverables and other Project information provide evidence for satisfaction of 
 
 The application should not consider a Gate ready merely because required files exist.
 
+Maintenance & Reliability Deliverables are governance records, not maintenance-analysis editors or a separate CMMS/EAM module. A consolidated Deliverable may reference multiple controlled Documents. Supporting analyses and evidence should eventually be linked through the planned SharePoint/document-reference architecture.
+
+Production integration Deliverables are system-agnostic governance records. In an SAP PP-centric environment, SAP PP may manage production master data and production orders while local machines and operators perform production execution and consumption is recorded through confirmations or backflushing. In an MES-centric environment, ERP may manage planning, inventory and financial functions while MES manages detailed execution, recipes, electronic batch records and material genealogy and returns production confirmations and material consumption to ERP. SAP PP and PAS-X are examples rather than mandatory systems.
+
+The application should track production integration requirements, responsibilities, Deliverables and Verification evidence regardless of the underlying system architecture. These Deliverables may reference approved URS, Technical Specifications, Automation Design, FAT/SAT, training, handover, Validation and as-built documentation. A separate Document should not be created where approved existing evidence already provides the required information. This methodology does not introduce a separate Production module or production-system integration functionality.
+
 ## 15.3 Stage Skipping
 
 A Stage may be marked Not Applicable / Skipped when the approved Package execution route does not require that Stage.
@@ -1147,6 +1215,10 @@ Where a Deliverable remains necessary, it should be:
 * completed in an earlier Stage;
 * reassigned to another applicable Stage; or
 * explicitly marked Not Applicable with justification.
+
+Not every Package requires the same depth of reliability analysis. The existing Not Applicable status should be used with justification where a Maintenance & Reliability Deliverable does not apply. ACA, FLOCCA, FMECA, RCM2 and MRO spare-parts assessments are supporting technical analyses rather than separate mandatory Gate Deliverables. Detailed FMECA or RCM2 analysis should not be mandatory for low-criticality equipment unless required by the approved Project methodology.
+
+Not every Package requires direct ERP/MES integration. The existing Not Applicable status should be used where a Production integration Deliverable does not apply. A production machine with MES connectivity may require all three Package-level Production integration Deliverables. A simple mechanical utility Package may have no direct production master-data requirements. A conveyor Package may require Production Interface & Integration Verification but no dedicated production BOM. The PM should determine applicability per Deliverable rather than treating all Production integration Deliverables as mandatory for every Package.
 
 Example:
 
@@ -1341,14 +1413,14 @@ The Approver must authenticate using their own credentials when providing the ap
 
 ## 15.8 Gate Signature Invitation Workflow
 
-The application should eventually support sending formal Gate approval/signature invitations to required Approvers.
+The application should support sending formal Gate approval/signature invitations to required Approvers.
 
 When a Gate is submitted for approval:
 
 1. the PM completes the Gate Review;
 2. the Gate Review content and supporting evidence are frozen for that review cycle;
 3. the required Approvers are identified;
-4. each required Approver receives an approval/signature invitation;
+4. each required Approver receives an approval/signature invitation when their configured Approval Level becomes eligible;
 5. the Approver securely accesses the Gate Review;
 6. the Approver reviews the Gate Decision, Criteria, Deliverables, accepted Actions and supporting evidence;
 7. the Approver approves/signs or rejects/comments;
@@ -1368,9 +1440,11 @@ Project Baseline Approval
 
 The PM should be able to identify which required approvals remain outstanding.
 
-The exact notification mechanism should be selected later.
+Email-based invitations should identify the frozen Review Cycle without treating access to the link or an email reply as formal approval. Delivery attempts and sanitized delivery results should remain visible as historical records. Provider acceptance means that the invitation was accepted for delivery; it does not prove inbox delivery.
 
-Email-based invitations may be used, but an email reply alone should not constitute the formal approval.
+Known failed deliveries may be retried manually while the Approver remains eligible. Unconfirmed delivery outcomes should not be retried automatically because the original send may have succeeded. Stable delivery identifiers and concurrency controls should prevent unnecessary duplicate sends.
+
+Invitation delivery failure must not record, alter or imply an approval Decision. It should be reported clearly without undoing the submitted Review Cycle.
 
 The formal approval/signature should occur through a secure authenticated workflow.
 
@@ -1588,6 +1662,10 @@ The PM should be able to tailor:
 - required Approvers
 
 to the Project's actual governance structure, subject to appropriate permissions.
+
+When master Gate Templates gain new default Criteria or Deliverables, the implementation should add only missing default items to existing live Gates. It must not recreate Gates or change their stable IDs; overwrite user-created or user-edited Criteria or Deliverables; duplicate existing default items; reset Completed or Not Applicable statuses; alter existing Approvers, approval levels, Gate Actions or Review Cycles; or modify frozen historical Review Cycle snapshots. New defaults must not silently modify active submitted Review Cycles and must preserve existing Stage transitions and Gate approval logic.
+
+For an active submitted or formally approved Gate, new template defaults must not alter the submitted or approved Review Cycle, frozen evidence, approval responses or historical Decision. The new defaults should be assessed only in a future eligible Review Cycle if the Gate is subsequently reopened or otherwise returned to preparation under the existing governance workflow.
 
 Project-specific changes must not modify the master Gate Template.
 
