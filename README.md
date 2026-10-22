@@ -16,6 +16,20 @@ bun dev
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
 
+## Gate Review Email
+
+Gate Review invitations are sent from server actions through the Resend HTTP API. Configure these values in an ignored `.env.local` file:
+
+```dotenv
+RESEND_API_KEY=re_your_key
+EMAIL_FROM=Kaizen Project Management <notifications@your-verified-domain.example>
+APP_BASE_URL=http://localhost:3000
+```
+
+`EMAIL_FROM` must contain a valid sender accepted by your Resend account, normally on a verified domain. `APP_BASE_URL` must be a credential-free absolute HTTP(S) URL and is used to create links to the exact frozen Review Cycle. Never prefix these variables with `NEXT_PUBLIC_` or commit their values.
+
+To test delivery, submit a prepared Project or Package Gate with an Approver email address you control. Review History records each delivery attempt, its sanitized failure details, and the provider message ID when Resend accepts the send request. `Sent` means submission to Resend succeeded; it does not claim inbox delivery. An active failed invitation can be retried from Review History after configuration is corrected. Refreshing or opening a Gate page does not send email.
+
 ## Identity Foundation
 
 Authentication uses Better Auth, a single-tenant Microsoft Entra workforce application, and PostgreSQL. Operational data uses the ignored `.data` directory by default; an explicitly selected PostgreSQL test mode is also available after migration and import.
@@ -39,9 +53,13 @@ MICROSOFT_CLIENT_SECRET=
 MICROSOFT_TENANT_ID=
 DATABASE_URL=
 OPERATIONAL_DATA_BACKEND=json
+
+APP_BASE_URL=http://localhost:3000
+RESEND_API_KEY=
+EMAIL_FROM=
 ```
 
-These values are server-side. Never prefix them with `NEXT_PUBLIC_`, print them in logs, or commit `.env.local`.
+All of these values are server-side. Never prefix them with `NEXT_PUBLIC_`, print them in logs, or commit `.env.local`.
 
 After creating an empty PostgreSQL database and setting `DATABASE_URL`, apply the database migrations:
 

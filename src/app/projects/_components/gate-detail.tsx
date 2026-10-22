@@ -12,6 +12,7 @@ import {
   gateReviewCycleStatusLabels,
   gateStatusLabels,
   canWithdrawGateReviewCycle,
+  canRetryGateReviewInvitation,
   getAwaitingGateReviewCycle,
   getGateCriterionStatusLabel,
   getGateReviewApprovalState,
@@ -19,6 +20,7 @@ import {
   isGateInPreparation,
   type Gate,
   type GateReviewCycle,
+  type GateReviewInvitationAttemptStatus,
 } from "@/lib/gates";
 import {
   formatProjectActionId,
@@ -31,6 +33,10 @@ import {
 type FormAction = (formData: FormData) => void | Promise<void>;
 type ItemAction = (itemId: string) => void | Promise<void>;
 type UpdateFormAction = (itemId: string, formData: FormData) => void | Promise<void>;
+type RetryInvitationAction = (
+  reviewCycleId: string,
+  gateApproverId: string,
+) => void | Promise<void>;
 
 type GateDetailProps = {
   backHref: string;
@@ -47,16 +53,19 @@ type GateDetailProps = {
   gate: Gate;
   gateActions: ProjectAction[];
   gateActionPackageId: string | null;
+  invitationFailureCount?: number;
   isCurrentGate: boolean;
   packages: { id: string; label: string }[];
   actionRegisterHref: string;
   approvalError?: string;
   approvalResponseAction: FormAction;
   reopenAction: FormAction;
+  retryInvitationAction: RetryInvitationAction;
   scopeLabel: string;
   stageLabel: string;
   submissionAction: FormAction;
   submittedCycleNumber?: number;
+  selectedReviewCycleId?: string;
   updateApproverAction: UpdateFormAction;
   updateCriterionAction: UpdateFormAction;
   updateDeliverableAction: UpdateFormAction;
@@ -78,16 +87,19 @@ export function GateDetail({
   gate,
   gateActions,
   gateActionPackageId,
+  invitationFailureCount,
   isCurrentGate,
   packages,
   actionRegisterHref,
   approvalError,
   approvalResponseAction,
   reopenAction,
+  retryInvitationAction,
   scopeLabel,
   stageLabel,
   submissionAction,
   submittedCycleNumber,
+  selectedReviewCycleId,
   updateApproverAction,
   updateCriterionAction,
   updateDeliverableAction,
@@ -154,6 +166,12 @@ export function GateDetail({
           valueClassName={approvalStatus.valueClassName}
         />
       </section>
+
+      {invitationFailureCount ? (
+        <p className="rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950">
+          The Gate workflow update was saved, but {invitationFailureCount} approval invitation{invitationFailureCount === 1 ? "" : "s"} could not be confirmed. Review the delivery details in Review History.
+        </p>
+      ) : null}
 
       <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
         <div>
@@ -347,7 +365,11 @@ export function GateDetail({
         )}
       </section>
 
-      <ReviewHistory cycles={gate.reviewCycles} />
+      <ReviewHistory
+        cycles={gate.reviewCycles}
+        retryInvitationAction={retryInvitationAction}
+        selectedReviewCycleId={selectedReviewCycleId}
+      />
 
       <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
         <div className="flex flex-wrap items-start justify-between gap-3">
@@ -588,7 +610,15 @@ export function GateDetail({
   );
 }
 
-function ReviewHistory({ cycles }: { cycles: GateReviewCycle[] }) {
+function ReviewHistory({
+  cycles,
+  retryInvitationAction,
+  selectedReviewCycleId,
+}: {
+  cycles: GateReviewCycle[];
+  retryInvitationAction: RetryInvitationAction;
+  selectedReviewCycleId?: string;
+}) {
   const orderedCycles = [...cycles].sort((left, right) => left.cycleNumber - right.cycleNumber);
 
   return (
@@ -607,7 +637,11 @@ function ReviewHistory({ cycles }: { cycles: GateReviewCycle[] }) {
       ) : (
         <div className="mt-5 space-y-3">
           {orderedCycles.map((cycle) => (
-            <article key={cycle.id} className="rounded-lg border border-slate-200 p-4">
+            <article
+              key={cycle.id}
+              id={`review-cycle-${cycle.id}`}
+              className={`scroll-mt-6 rounded-lg border p-4 ${selectedReviewCycleId === cycle.id ? "border-blue-400 bg-blue-50/40 ring-2 ring-blue-100" : "border-slate-200"}`}
+            >
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
                   <h3 className="font-semibold text-slate-950">Review Cycle {cycle.cycleNumber}</h3>
@@ -639,7 +673,7 @@ function ReviewHistory({ cycles }: { cycles: GateReviewCycle[] }) {
 
               <details
                 className="mt-4 border-t border-slate-100 pt-3"
-                open={cycle.status === "awaiting_approval"}
+                open={cycle.status === "awaiting_approval" || selectedReviewCycleId === cycle.id}
               >
                 <summary className="cursor-pointer text-sm font-semibold text-slate-700">
                   View frozen Review Cycle
@@ -715,6 +749,24 @@ function ReviewHistory({ cycles }: { cycles: GateReviewCycle[] }) {
                                 {approver.response.comment ? ` - ${approver.response.comment}` : ""}
                               </p>
                             ) : null}
+                            <InvitationDelivery
+                              approver={approver}
+                              canRetry={canRetryGateReviewInvitation(
+                                cycle,
+                                approver.gateApproverId,
+                              )}
+                              waitingForApprovalLevel={
+                                cycle.status === "awaiting_approval" &&
+                                approver.response === null &&
+                                getGateReviewApprovalState(cycle).activeLevel !==
+                                  approver.approvalLevel
+                              }
+                              retryAction={retryInvitationAction.bind(
+                                null,
+                                cycle.id,
+                                approver.gateApproverId,
+                              )}
+                            />
                           </div>
                         ))}
                     </div>
@@ -733,6 +785,99 @@ function ReviewHistory({ cycles }: { cycles: GateReviewCycle[] }) {
       )}
     </section>
   );
+}
+
+function InvitationDelivery({
+  approver,
+  canRetry,
+  retryAction,
+  waitingForApprovalLevel,
+}: {
+  approver: GateReviewCycle["approvers"][number];
+  canRetry: boolean;
+  retryAction: FormAction;
+  waitingForApprovalLevel: boolean;
+}) {
+  if (!approver.invitation) {
+    return (
+      <p className="mt-2 text-xs text-slate-500">
+        {waitingForApprovalLevel
+          ? "Invitation waiting for the preceding Approval Levels."
+          : "No invitation delivery recorded."}
+      </p>
+    );
+  }
+
+  if (approver.invitation.attempts.length === 0) {
+    return (
+      <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+        <p className="text-xs text-slate-600">
+          Invitation activated {formatDateTime(approver.invitation.activatedAt)}; delivery is pending.
+        </p>
+        {canRetry ? <InvitationRetryForm action={retryAction} label="Send invitation" /> : null}
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-3 border-t border-slate-200 pt-3">
+      <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+        Invitation delivery
+      </p>
+      <ul className="mt-2 space-y-2">
+        {approver.invitation.attempts.map((attempt) => (
+          <li key={attempt.id} className="rounded-md bg-white px-3 py-2 text-xs text-slate-700">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="font-semibold text-slate-900">
+                {invitationAttemptStatusLabel(attempt.status)}
+              </span>
+              <span>{formatDateTime(attempt.completedAt ?? attempt.attemptedAt)}</span>
+            </div>
+            {attempt.providerMessageId ? (
+              <p className="mt-1 break-all text-slate-500">
+                Provider message ID: {attempt.providerMessageId}
+              </p>
+            ) : null}
+            {attempt.error ? (
+              <p className="mt-1 text-amber-900">
+                {attempt.error.message} ({attempt.error.code})
+              </p>
+            ) : null}
+          </li>
+        ))}
+      </ul>
+      {canRetry ? (
+        <div className="mt-3 flex justify-end">
+          <InvitationRetryForm action={retryAction} label="Retry invitation" />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function InvitationRetryForm({
+  action,
+  label,
+}: {
+  action: FormAction;
+  label: string;
+}) {
+  return (
+    <form action={action}>
+      <button type="submit" className="button-secondary">
+        {label}
+      </button>
+    </form>
+  );
+}
+
+function invitationAttemptStatusLabel(
+  status: GateReviewInvitationAttemptStatus,
+) {
+  if (status === "sent") return "Invitation sent";
+  if (status === "failed") return "Invitation failed";
+  if (status === "indeterminate") return "Delivery unconfirmed";
+  return "Sending invitation";
 }
 
 function FrozenList({

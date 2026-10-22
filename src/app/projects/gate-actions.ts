@@ -10,11 +10,16 @@ import {
 } from "@/lib/deliverables";
 import {
   gateReviewApproverResponseOutcomes,
+  getGateReviewApprovalState,
   isGateInPreparation,
   parseGateApproverFormData,
   parseGateCriterionFormData,
   type GateReviewResponseInput,
 } from "@/lib/gates";
+import {
+  dispatchPackageGateReviewInvitations,
+  dispatchProjectGateReviewInvitations,
+} from "@/lib/gate-review-invitations";
 import {
   createPackageGateApprover,
   createPackageGateCriterion,
@@ -59,8 +64,21 @@ export async function submitProjectGateForApprovalAction(projectId: string, gate
     redirect(projectGatePath(projectId, gateId));
   }
 
+  const gateApproverIds = getGateReviewApprovalState(result.reviewCycle)
+    .eligibleApprovers.map((approver) => approver.gateApproverId);
+  const invitationFailures = await dispatchProjectInvitationsSafely({
+    projectId,
+    gateId,
+    reviewCycleId: result.reviewCycle.id,
+    gateApproverIds,
+  });
   revalidateProjectGate(projectId, gateId);
-  redirect(`${projectGatePath(projectId, gateId)}?submitted=${result.reviewCycle.cycleNumber}`);
+  redirect(withSubmissionResult(
+    projectGatePath(projectId, gateId),
+    result.reviewCycle.id,
+    result.reviewCycle.cycleNumber,
+    invitationFailures,
+  ));
 }
 
 export async function submitPackageGateForApprovalAction(
@@ -78,8 +96,22 @@ export async function submitPackageGateForApprovalAction(
     redirect(packageGatePath(projectId, packageId, gateId));
   }
 
+  const gateApproverIds = getGateReviewApprovalState(result.reviewCycle)
+    .eligibleApprovers.map((approver) => approver.gateApproverId);
+  const invitationFailures = await dispatchPackageInvitationsSafely({
+    projectId,
+    packageId,
+    gateId,
+    reviewCycleId: result.reviewCycle.id,
+    gateApproverIds,
+  });
   revalidatePackageGate(projectId, packageId, gateId);
-  redirect(`${packageGatePath(projectId, packageId, gateId)}?submitted=${result.reviewCycle.cycleNumber}`);
+  redirect(withSubmissionResult(
+    packageGatePath(projectId, packageId, gateId),
+    result.reviewCycle.id,
+    result.reviewCycle.cycleNumber,
+    invitationFailures,
+  ));
 }
 
 export async function respondToProjectGateReviewAction(
@@ -102,9 +134,17 @@ export async function respondToProjectGateReviewAction(
     redirect(withApprovalError(path, result.outcome));
   }
 
+  const invitationFailures = result.activatedApproverIds.length > 0
+    ? await dispatchProjectInvitationsSafely({
+        projectId,
+        gateId,
+        reviewCycleId: result.reviewCycle.id,
+        gateApproverIds: result.activatedApproverIds,
+      })
+    : 0;
   revalidateProjectGate(projectId, gateId);
   revalidatePath(`/projects/${projectId}/actions`);
-  redirect(path);
+  redirect(withInvitationWarning(path, result.reviewCycle.id, invitationFailures));
 }
 
 export async function respondToPackageGateReviewAction(
@@ -129,9 +169,62 @@ export async function respondToPackageGateReviewAction(
     redirect(withApprovalError(path, result.outcome));
   }
 
+  const invitationFailures = result.activatedApproverIds.length > 0
+    ? await dispatchPackageInvitationsSafely({
+        projectId,
+        packageId,
+        gateId,
+        reviewCycleId: result.reviewCycle.id,
+        gateApproverIds: result.activatedApproverIds,
+      })
+    : 0;
   revalidatePackageGate(projectId, packageId, gateId);
   revalidatePath(`/projects/${projectId}/actions`);
-  redirect(path);
+  redirect(withInvitationWarning(path, result.reviewCycle.id, invitationFailures));
+}
+
+export async function retryProjectGateReviewInvitationAction(
+  projectId: string,
+  gateId: string,
+  reviewCycleId: string,
+  gateApproverId: string,
+) {
+  const invitationFailures = await dispatchProjectInvitationsSafely({
+    projectId,
+    gateId,
+    reviewCycleId,
+    gateApproverIds: [gateApproverId],
+    retryFailed: true,
+  });
+  revalidateProjectGate(projectId, gateId);
+  redirect(withReviewCycleResult(
+    projectGatePath(projectId, gateId),
+    reviewCycleId,
+    invitationFailures,
+  ));
+}
+
+export async function retryPackageGateReviewInvitationAction(
+  projectId: string,
+  packageId: string,
+  gateId: string,
+  reviewCycleId: string,
+  gateApproverId: string,
+) {
+  const invitationFailures = await dispatchPackageInvitationsSafely({
+    projectId,
+    packageId,
+    gateId,
+    reviewCycleId,
+    gateApproverIds: [gateApproverId],
+    retryFailed: true,
+  });
+  revalidatePackageGate(projectId, packageId, gateId);
+  redirect(withReviewCycleResult(
+    packageGatePath(projectId, packageId, gateId),
+    reviewCycleId,
+    invitationFailures,
+  ));
 }
 
 export async function withdrawProjectGateSubmissionAction(projectId: string, gateId: string) {
@@ -681,6 +774,69 @@ function parseDevelopmentGateReviewResponse(
 function withApprovalError(path: string, outcome: string) {
   const query = new URLSearchParams({ approvalError: outcome });
   return `${path}?${query}`;
+}
+
+function withSubmissionResult(
+  path: string,
+  reviewCycleId: string,
+  cycleNumber: number,
+  invitationFailures: number,
+) {
+  const query = new URLSearchParams({
+    submitted: String(cycleNumber),
+    reviewCycle: reviewCycleId,
+  });
+  if (invitationFailures > 0) {
+    query.set("invitationFailures", String(invitationFailures));
+  }
+  return `${path}?${query}#review-cycle-${reviewCycleId}`;
+}
+
+function withInvitationWarning(
+  path: string,
+  reviewCycleId: string,
+  invitationFailures: number,
+) {
+  if (invitationFailures === 0) return path;
+  const query = new URLSearchParams({
+    reviewCycle: reviewCycleId,
+    invitationFailures: String(invitationFailures),
+  });
+  return `${path}?${query}#review-cycle-${reviewCycleId}`;
+}
+
+function withReviewCycleResult(
+  path: string,
+  reviewCycleId: string,
+  invitationFailures: number,
+) {
+  const query = new URLSearchParams({ reviewCycle: reviewCycleId });
+  if (invitationFailures > 0) {
+    query.set("invitationFailures", String(invitationFailures));
+  }
+  return `${path}?${query}#review-cycle-${reviewCycleId}`;
+}
+
+async function dispatchProjectInvitationsSafely(input: Parameters<
+  typeof dispatchProjectGateReviewInvitations
+>[0]) {
+  try {
+    const summary = await dispatchProjectGateReviewInvitations(input);
+    return summary.failed;
+  } catch {
+    return input.gateApproverIds.length;
+  }
+}
+
+async function dispatchPackageInvitationsSafely(input: Parameters<
+  typeof dispatchPackageGateReviewInvitations
+>[0]) {
+  try {
+    const summary = await dispatchPackageGateReviewInvitations(input);
+    return summary.failed;
+  } catch {
+    return input.gateApproverIds.length;
+  }
 }
 
 function projectGatePath(projectId: string, gateId: string) {

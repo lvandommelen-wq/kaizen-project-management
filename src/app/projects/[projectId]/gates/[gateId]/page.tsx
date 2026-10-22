@@ -10,6 +10,7 @@ import {
   deleteProjectGateCriterionAction,
   reopenProjectGateAction,
   respondToProjectGateReviewAction,
+  retryProjectGateReviewInvitationAction,
   submitProjectGateForApprovalAction,
   updateProjectDeliverableAction,
   updateProjectGateApproverAction,
@@ -49,6 +50,7 @@ export default async function ProjectGatePage({
       contextLabel={`${project.projectNumber} - ${project.name}`}
       actionRegisterHref={`/projects/${project.id}/actions`}
       approvalError={parseQueryValue(query.approvalError)}
+      invitationFailureCount={parsePositiveInteger(query.invitationFailures)}
       approvalResponseAction={respondToProjectGateReviewAction.bind(
         null,
         project.id,
@@ -71,10 +73,16 @@ export default async function ProjectGatePage({
         label: `${projectPackage.packageCode} - ${projectPackage.packageName}`,
       }))}
       reopenAction={reopenProjectGateAction.bind(null, project.id, gate.id)}
+      retryInvitationAction={retryProjectGateReviewInvitationAction.bind(
+        null,
+        project.id,
+        gate.id,
+      )}
       scopeLabel="Project"
       stageLabel={projectStageLabels[gate.stageId]}
       submissionAction={submitProjectGateForApprovalAction.bind(null, project.id, gate.id)}
       submittedCycleNumber={submittedCycleNumber}
+      selectedReviewCycleId={parseQueryValue(query.reviewCycle)}
       updateApproverAction={updateProjectGateApproverAction.bind(null, project.id, gate.id)}
       updateCriterionAction={updateProjectGateCriterionAction.bind(null, project.id, gate.id)}
       updateDeliverableAction={updateProjectDeliverableAction.bind(null, project.id, gate.id)}
@@ -86,6 +94,11 @@ export default async function ProjectGatePage({
 function parseCycleNumber(value: string | string[] | undefined) {
   const cycleNumber = Number(Array.isArray(value) ? value[0] : value);
   return Number.isInteger(cycleNumber) && cycleNumber > 0 ? cycleNumber : undefined;
+}
+
+function parsePositiveInteger(value: string | string[] | undefined) {
+  const parsed = Number(Array.isArray(value) ? value[0] : value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
 }
 
 function parseQueryValue(value: string | string[] | undefined) {
