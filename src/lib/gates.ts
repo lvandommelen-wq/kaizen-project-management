@@ -15,14 +15,22 @@ export const gateReviewCycleStatuses = [
   "approved_with_actions",
 ] as const;
 export const gateReviewApproverResponseOutcomes = ["approved", "returned_for_rework"] as const;
+export const gateReviewInvitationAttemptStatuses = [
+  "dispatching",
+  "sent",
+  "failed",
+  "indeterminate",
+] as const;
 export const gateReviewBaselineTypes = ["scope", "cost", "schedule", "other"] as const;
-export const gateReviewCycleSchemaVersion = 2 as const;
+export const gateReviewCycleSchemaVersion = 3 as const;
 
 export type GateStatus = (typeof gateStatuses)[number];
 export type PmGateDecision = (typeof pmGateDecisions)[number];
 export type GateCriterionStatus = (typeof gateCriterionStatuses)[number];
 export type GateReviewCycleStatus = (typeof gateReviewCycleStatuses)[number];
 export type GateReviewApproverResponseOutcome = (typeof gateReviewApproverResponseOutcomes)[number];
+export type GateReviewInvitationAttemptStatus =
+  (typeof gateReviewInvitationAttemptStatuses)[number];
 export type GateReviewBaselineType = (typeof gateReviewBaselineTypes)[number];
 
 export type GateCriterion = {
@@ -126,6 +134,34 @@ export type GateReviewApproverResponse = {
   comment: string;
 };
 
+export type GateReviewInvitationError = {
+  code: string;
+  message: string;
+};
+
+export type GateReviewInvitationAttempt = {
+  id: string;
+  idempotencyKey: string;
+  provider: string;
+  status: GateReviewInvitationAttemptStatus;
+  attemptedAt: string;
+  completedAt: string | null;
+  providerMessageId: string | null;
+  error: GateReviewInvitationError | null;
+};
+
+export type GateReviewInvitation = {
+  activatedAt: string;
+  attempts: GateReviewInvitationAttempt[];
+};
+
+export type GateReviewInvitationAttemptResult =
+  | { status: "sent"; providerMessageId: string }
+  | {
+      status: "failed" | "indeterminate";
+      error: GateReviewInvitationError;
+    };
+
 export type GateReviewApproverSnapshot = {
   gateApproverId: string;
   name: string;
@@ -134,6 +170,7 @@ export type GateReviewApproverSnapshot = {
   approvalRole: string;
   approvalLevel: number;
   response: GateReviewApproverResponse | null;
+  invitation: GateReviewInvitation | null;
 };
 
 export type GateReviewCycle = {
@@ -235,6 +272,7 @@ export type GateReviewResponseTransition =
       reviewCycle: GateReviewCycle;
       completion: GateReviewResponseCompletion;
       acceptedActionIds: string[];
+      activatedApproverIds: string[];
     }
   | { outcome: "not_submitted" }
   | { outcome: "review_cycle_mismatch" }
@@ -264,6 +302,7 @@ export type GateDefinition<StageId extends string> = {
   id: string;
   templateVersion: number;
   name: string;
+  previousNames?: readonly string[];
   stageId: StageId;
   criteria?: GateCriterionDefinition[];
 };
@@ -315,6 +354,7 @@ export type GateReviewResponseResult<Entity> =
       entity: Entity;
       reviewCycle: GateReviewCycle;
       completion: GateReviewResponseCompletion;
+      activatedApproverIds: string[];
     }
   | Exclude<GateReviewResponseTransition, { outcome: "recorded" }>
   | { outcome: "accepted_actions_missing" }
@@ -356,7 +396,7 @@ export function normalizeGates<StageId extends string>(
     return {
       id,
       templateVersion: definition.templateVersion,
-      name: existingGate?.name || definition.name,
+      name: normalizeGateName(existingGate?.name, definition),
       stageId: definition.stageId,
       status,
       approvers: normalizeGateApprovers(id, existingGate?.approvers),
@@ -376,6 +416,10 @@ export function gatesRequireTemplateUpdate<StageId extends string>(
     const gate = gates?.find((candidate) => candidate.id === id || candidate.stageId === definition.stageId);
 
     if (gate?.templateVersion !== definition.templateVersion) {
+      return true;
+    }
+
+    if (normalizeGateName(gate?.name, definition) !== gate?.name) {
       return true;
     }
 
@@ -421,6 +465,16 @@ export function gatesRequireTemplateUpdate<StageId extends string>(
       defaultTemplateIds.some((templateId) => !expectedTemplateIds.has(templateId))
     );
   });
+}
+
+function normalizeGateName<StageId extends string>(
+  existingName: string | undefined,
+  definition: GateDefinition<StageId>,
+) {
+  if (!existingName || definition.previousNames?.includes(existingName)) {
+    return definition.name;
+  }
+  return existingName;
 }
 
 export function parseGateCriterionFormData(formData: FormData): GateCriterionInput {
@@ -524,6 +578,121 @@ export function getGateReviewApprovalState(
   };
 }
 
+export function activateGateReviewInvitations(
+  cycle: GateReviewCycle,
+  activatedAt: string,
+) {
+  const activatedApproverIds: string[] = [];
+  for (const approver of getGateReviewApprovalState(cycle).eligibleApprovers) {
+    if (approver.invitation) continue;
+    approver.invitation = { activatedAt, attempts: [] };
+    activatedApproverIds.push(approver.gateApproverId);
+  }
+  return activatedApproverIds;
+}
+
+export function claimGateReviewInvitationAttempt(
+  cycle: GateReviewCycle,
+  gateApproverId: string,
+  input: {
+    attemptId: string;
+    idempotencyKey: string;
+    provider: string;
+    attemptedAt: string;
+    allowFailedRetry?: boolean;
+  },
+) {
+  const approver = cycle.approvers.find(
+    (candidate) => candidate.gateApproverId === gateApproverId,
+  );
+  const invitation = approver?.invitation;
+  if (
+    !approver ||
+    !invitation ||
+    !canDispatchGateReviewInvitation(
+      cycle,
+      approver,
+      input.allowFailedRetry ?? false,
+    )
+  ) {
+    return null;
+  }
+
+  const attempt: GateReviewInvitationAttempt = {
+    id: input.attemptId,
+    idempotencyKey: input.idempotencyKey,
+    provider: input.provider,
+    status: "dispatching",
+    attemptedAt: input.attemptedAt,
+    completedAt: null,
+    providerMessageId: null,
+    error: null,
+  };
+  invitation.attempts.push(attempt);
+  return { approver, attempt };
+}
+
+export function canRetryGateReviewInvitation(
+  cycle: GateReviewCycle,
+  gateApproverId: string,
+) {
+  const approver = cycle.approvers.find(
+    (candidate) => candidate.gateApproverId === gateApproverId,
+  );
+  return approver
+    ? canDispatchGateReviewInvitation(cycle, approver, true)
+    : false;
+}
+
+function canDispatchGateReviewInvitation(
+  cycle: GateReviewCycle,
+  approver: GateReviewApproverSnapshot,
+  allowFailedRetry: boolean,
+) {
+  if (
+    cycle.status !== "awaiting_approval" ||
+    !approver.invitation ||
+    approver.response ||
+    !getGateReviewApprovalState(cycle).eligibleApprovers.some(
+      (candidate) => candidate.gateApproverId === approver.gateApproverId,
+    )
+  ) {
+    return false;
+  }
+
+  const attempts = approver.invitation.attempts;
+  if (attempts.some((attempt) => attempt.status === "sent")) return false;
+  if (attempts.length === 0) return true;
+  return allowFailedRetry && attempts.at(-1)?.status === "failed";
+}
+
+export function completeGateReviewInvitationAttempt(
+  cycle: GateReviewCycle,
+  gateApproverId: string,
+  attemptId: string,
+  result: GateReviewInvitationAttemptResult,
+  completedAt: string,
+) {
+  const approver = cycle.approvers.find(
+    (candidate) => candidate.gateApproverId === gateApproverId,
+  );
+  const attempt = approver?.invitation?.attempts.find(
+    (candidate) => candidate.id === attemptId,
+  );
+  if (!attempt || attempt.status !== "dispatching") return false;
+
+  attempt.status = result.status;
+  attempt.completedAt = completedAt;
+  if (result.status === "sent") {
+    attempt.providerMessageId = result.providerMessageId;
+    attempt.error = null;
+  } else {
+    attempt.providerMessageId = null;
+    attempt.error = { ...result.error };
+  }
+  return true;
+}
+
 export function recordGateReviewResponse(
   gate: Gate,
   input: GateReviewResponseInput,
@@ -579,16 +748,21 @@ export function recordGateReviewResponse(
       reviewCycle,
       completion: "returned_for_rework",
       acceptedActionIds: [],
+      activatedApproverIds: [],
     };
   }
 
   const nextState = getGateReviewApprovalState(reviewCycle);
   if (nextState.eligibleApprovers.length > 0) {
+    const activatedApproverIds = nextState.activeLevel !== approvalState.activeLevel
+      ? activateGateReviewInvitations(reviewCycle, respondedAt)
+      : [];
     return {
       outcome: "recorded",
       reviewCycle,
       completion: "pending",
       acceptedActionIds: [],
+      activatedApproverIds,
     };
   }
 
@@ -608,6 +782,7 @@ export function recordGateReviewResponse(
     reviewCycle,
     completion: decision,
     acceptedActionIds,
+    activatedApproverIds: [],
   };
 }
 
@@ -716,7 +891,7 @@ export function createGateReviewCycle(input: CreateGateReviewCycleInput): GateRe
     .sort((left, right) => right.cycleNumber - left.cycleNumber)[0] ?? null;
   const cycleNumber = (previousCycle?.cycleNumber ?? 0) + 1;
 
-  return {
+  const reviewCycle: GateReviewCycle = {
     schemaVersion: gateReviewCycleSchemaVersion,
     id: input.id,
     cycleNumber,
@@ -778,9 +953,12 @@ export function createGateReviewCycle(input: CreateGateReviewCycleInput): GateRe
       approvalRole: approver.approvalRole,
       approvalLevel: approver.approvalLevel,
       response: null,
+      invitation: null,
     })),
     relatedReworkActionIds: [],
   };
+  activateGateReviewInvitations(reviewCycle, input.submittedAt);
+  return reviewCycle;
 }
 
 function normalizeGateCriteria(
@@ -896,7 +1074,26 @@ function normalizeGateReviewCycles(reviewCycles: GateReviewCycle[] | undefined) 
       ...cycle.gate,
       stageLabel: cycle.gate.stageLabel || cycle.gate.stageId,
     },
+    approvers: cycle.approvers.map((approver) => ({
+      ...approver,
+      invitation: normalizeGateReviewInvitation(approver.invitation),
+    })),
   }));
+}
+
+function normalizeGateReviewInvitation(
+  invitation: GateReviewInvitation | null | undefined,
+): GateReviewInvitation | null {
+  if (!invitation || !Array.isArray(invitation.attempts)) return null;
+  return {
+    activatedAt: invitation.activatedAt,
+    attempts: invitation.attempts.map((attempt) => ({
+      ...attempt,
+      completedAt: attempt.completedAt ?? null,
+      providerMessageId: attempt.providerMessageId ?? null,
+      error: attempt.error ? { ...attempt.error } : null,
+    })),
+  };
 }
 
 function normalizeGateStatus(

@@ -3,7 +3,10 @@ import type { PackageStageId } from "./packages";
 import type { ProjectStageId } from "./projects";
 
 export const governanceTemplateVersion = 2;
-const projectBaselineApprovalTemplateVersion = 3;
+const projectBaselineApprovalTemplateVersion = 4;
+const projectDeliveryCompleteTemplateVersion = 3;
+const packageDefinitionCompleteTemplateVersion = 3;
+const packageHandoverTemplateVersion = 3;
 
 export type DeliverableTemplateDefinition = {
   id: string;
@@ -71,6 +74,10 @@ export const projectGateTemplates: GovernanceGateTemplate<ProjectStageId>[] = [
     criteria: [
       criterion("project_scope_approved", "Overall Project Scope is defined and approved."),
       criterion("project_requirements_approved", "Project Requirements / URS are sufficiently defined and approved."),
+      criterion(
+        "production_integration_architecture_defined",
+        "Production integration architecture, master-data responsibilities and applicable ERP/MES requirements are defined.",
+      ),
       criterion("concept_design_mature", "Concept / Basic Design is sufficiently mature."),
       criterion("master_layout_approved", "Master Layout is approved at the required maturity."),
       criterion("package_breakdown_defined", "Package breakdown is sufficiently defined."),
@@ -96,6 +103,12 @@ export const projectGateTemplates: GovernanceGateTemplate<ProjectStageId>[] = [
     deliverables: [
       deliverable("approved_project_scope", "Approved Project Scope"),
       deliverable("approved_overall_requirements", "Approved URS / Overall Requirements"),
+      deliverable(
+        "production_integration_master_data_strategy",
+        "Production Integration & Master Data Strategy",
+        "Defines the system-agnostic ERP/MES integration architecture and system responsibilities; production master-data ownership; production order handling; production BOM and recipe requirements; material consumption and inventory reporting; batch/lot traceability requirements; interfaces between production equipment, automation, MES and ERP; and master-data preparation and handover responsibilities.",
+        ["production_integration_architecture_defined"],
+      ),
       deliverable("concept_basic_design", "Concept / Basic Design"),
       deliverable("master_layout", "Master Layout"),
       deliverable("package_breakdown_scope_structure", "Package Breakdown / Scope Structure"),
@@ -116,7 +129,7 @@ export const projectGateTemplates: GovernanceGateTemplate<ProjectStageId>[] = [
   },
   {
     id: "project_delivery_complete",
-    templateVersion: governanceTemplateVersion,
+    templateVersion: projectDeliveryCompleteTemplateVersion,
     name: "Project Delivery Complete",
     stageId: "delivery",
     criteria: [
@@ -141,6 +154,16 @@ export const projectGateTemplates: GovernanceGateTemplate<ProjectStageId>[] = [
     ],
     deliverables: [
       deliverable("package_handover_records", "Package Handover Records"),
+      deliverable(
+        "production_readiness_integration_overview",
+        "Production Readiness & Integration Overview",
+        "Consolidates production integration readiness across applicable Packages, including production master-data availability; production interface verification; production order and material-consumption functionality; traceability readiness; operational procedures and training; outstanding production integration issues; and acceptance by the receiving Production organization.",
+        [
+          "cross_package_integration_complete",
+          "delivery_verification_evidence_available",
+          "operations_training_complete",
+        ],
+      ),
       deliverable("integrated_sat_evidence", "Integrated SAT / System Test Evidence — where applicable"),
       deliverable("updated_master_layout", "Updated Master Layout / appropriate as-built maturity"),
       deliverable("handover_documentation", "Handover Documentation"),
@@ -220,12 +243,17 @@ export const projectGateTemplates: GovernanceGateTemplate<ProjectStageId>[] = [
 export const packageGateTemplates: GovernanceGateTemplate<PackageStageId>[] = [
   {
     id: "definition_complete",
-    templateVersion: governanceTemplateVersion,
-    name: "Definition Complete / Ready for Execution Strategy",
+    templateVersion: packageDefinitionCompleteTemplateVersion,
+    name: "Definition Complete",
+    previousNames: ["Definition Complete / Ready for Execution Strategy"],
     stageId: "definition",
     criteria: [
       criterion("package_scope_defined", "Package Scope is sufficiently defined."),
       criterion("package_requirements_defined", "Package Requirements are sufficiently defined."),
+      criterion(
+        "production_integration_requirements_defined",
+        "Production integration requirements, interfaces and applicable master-data requirements are sufficiently defined.",
+      ),
       criterion("technical_specification_mature", "Technical Specification is sufficiently mature for the intended next step."),
       criterion("package_boundaries_defined", "Package boundaries are defined."),
       criterion("package_interfaces_identified", "Package Interfaces are identified."),
@@ -245,6 +273,12 @@ export const packageGateTemplates: GovernanceGateTemplate<PackageStageId>[] = [
     deliverables: [
       deliverable("package_scope", "Package Scope"),
       deliverable("package_requirements", "Package Requirements"),
+      deliverable(
+        "production_integration_requirements",
+        "Production Integration Requirements",
+        "Defines the Package-specific production integration requirements, including production order handling; production BOM/recipe requirements; material identification and consumption; batch/lot traceability; equipment-to-MES/ERP interfaces; production confirmations; relevant automation and IT/OT interfaces; and production master-data responsibilities where applicable.",
+        ["production_integration_requirements_defined"],
+      ),
       deliverable("technical_specification", "Technical Specification"),
       deliverable("package_raci", "Package RACI / Package Organization"),
       deliverable("package_interface_definition", "Package Interface Definition"),
@@ -255,7 +289,8 @@ export const packageGateTemplates: GovernanceGateTemplate<PackageStageId>[] = [
   {
     id: "execution_strategy_selection",
     templateVersion: governanceTemplateVersion,
-    name: "Execution Strategy Selection",
+    name: "Execution Model & Technical Selection",
+    previousNames: ["Execution Strategy Selection"],
     stageId: "tendering",
     criteria: [
       criterion("tender_package_defined", "Tender / RFQ Package was sufficiently defined."),
@@ -315,7 +350,7 @@ export const packageGateTemplates: GovernanceGateTemplate<PackageStageId>[] = [
   },
   {
     id: "package_handover",
-    templateVersion: governanceTemplateVersion,
+    templateVersion: packageHandoverTemplateVersion,
     name: "Package Handover / Execution Complete",
     stageId: "execution",
     criteria: [
@@ -335,6 +370,10 @@ export const packageGateTemplates: GovernanceGateTemplate<PackageStageId>[] = [
       criterion("package_mocs_implemented", "Approved Package-related MOCs have been implemented."),
       criterion("no_blocking_moc", "No unresolved MOC prevents handover."),
       criterion("actions_risks_issues_controlled", "Critical Actions/Risks/Issues do not prevent handover."),
+      criterion(
+        "production_readiness_demonstrated",
+        "Required production master data is available and verified, production interfaces have been tested, and the receiving Production organization is ready to operate the equipment.",
+      ),
       criterion("package_ready_for_use", "Package is safe and ready for intended use / next Project activity."),
       criterion("handover_accepted", "Receiving organization accepts handover."),
     ],
@@ -344,6 +383,28 @@ export const packageGateTemplates: GovernanceGateTemplate<PackageStageId>[] = [
       deliverable("installation_documentation", "Installation Documentation — where applicable"),
       deliverable("commissioning_documentation", "Commissioning Documentation — where applicable"),
       deliverable("sat_protocol_report", "SAT Protocol / Report — where applicable"),
+      deliverable(
+        "production_master_data_handover",
+        "Production Master Data Handover",
+        "Covers applicable production BOMs, work centers, routings, recipes, material definitions, production versions, equipment/system references and other required ERP/MES master data, including SAP PP master data where applicable. Confirms that required data has been prepared, transferred and verified in the responsible system.",
+        ["production_readiness_demonstrated"],
+      ),
+      deliverable(
+        "production_interface_integration_verification",
+        "Production Interface & Integration Verification",
+        "Demonstrates that applicable production interfaces and data exchanges have been tested, including where relevant production order transfer; recipe/parameter transfer; material identification and consumption; production confirmations; batch/lot traceability; machine/MES/ERP communication; and interface failure/recovery scenarios. Existing FAT/SAT and Verification documentation should be reused where appropriate.",
+        [
+          "production_readiness_demonstrated",
+          "sat_verification_complete",
+          "package_verification_evidence_available",
+        ],
+      ),
+      deliverable(
+        "production_operational_readiness_training",
+        "Production Operational Readiness & Training",
+        "Demonstrates that the receiving Production organization is prepared to operate the Package, covering applicable operating procedures; operator training and required qualifications; production master-data readiness; operational responsibilities; outstanding production issues; and formal operational acceptance.",
+        ["production_readiness_demonstrated", "training_complete", "handover_accepted"],
+      ),
       deliverable("training_records", "Training Records — where applicable"),
       deliverable("manuals", "Manuals"),
       deliverable("spare_parts_information", "Spare-Parts Information — where applicable"),

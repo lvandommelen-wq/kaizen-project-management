@@ -567,6 +567,7 @@ export async function respondToProjectGateReview(
       entity: project,
       reviewCycle: transition.reviewCycle,
       completion: transition.completion,
+      activatedApproverIds: transition.activatedApproverIds,
     };
   });
 }
