@@ -8,7 +8,6 @@ import {
   deleteProjectAction,
   deleteProjectGovernanceTierAction,
   moveProjectGovernanceTierAction,
-  returnProjectToPreviousStageAction,
   updateProjectGovernanceTierAction,
 } from "../actions";
 import {
@@ -19,7 +18,6 @@ import {
   type ProjectPackage,
 } from "@/lib/packages";
 import {
-  getPreviousProjectStage,
   getProject,
   getProjectLifecycle,
   projectStageLabels,
@@ -28,6 +26,7 @@ import {
 import { getProjectActionDeletionBlocker } from "@/lib/project-actions";
 import { getCurrentProjectRole } from "@/lib/authorization";
 import { getOperationalDataBackend } from "@/lib/operational/backend";
+import { canManageProjectAccess } from "@/lib/access-management";
 
 export const dynamic = "force-dynamic";
 
@@ -54,10 +53,10 @@ export default async function ProjectDetailPage({
 
   const packages = await getPackages(project.id);
   const projectLifecycle = getProjectLifecycle(project.validationRequired);
-  const previousStage = getPreviousProjectStage(project.currentStage, project.validationRequired);
   const currentGate = project.gates.find((gate) => gate.stageId === project.currentStage);
   const deletionBlocker = await getProjectActionDeletionBlocker(project.id);
-  const returnAction = previousStage ? returnProjectToPreviousStageAction.bind(null, project.id) : null;
+  const canManageAccess = getOperationalDataBackend() === "postgres"
+    && await canManageProjectAccess(access.user, project.id);
   const deleteAction = deleteProjectAction.bind(null, project.id);
   const tierError = queryValue(query.tierError);
   const tierErrorId = queryValue(query.tierId);
@@ -73,7 +72,7 @@ export default async function ProjectDetailPage({
         </div>
         <div className="flex gap-3">
           <Link href="/projects" className="button-secondary">
-            Projects
+            All projects
           </Link>
           {access?.role !== "viewer" ? (
             <Link href={`/projects/${project.id}/edit`} className="button-secondary">
@@ -91,9 +90,9 @@ export default async function ProjectDetailPage({
               History
             </Link>
           ) : null}
-          {getOperationalDataBackend() === "postgres" && access?.role === "owner" ? (
-            <Link href={`/projects/${project.id}/members`} className="button-secondary">
-              Members
+          {canManageAccess ? (
+            <Link href={`/projects/${project.id}/access`} className="button-secondary">
+              Access Management
             </Link>
           ) : null}
           {access?.role === "owner" && !deletionBlocker ? (
@@ -125,13 +124,6 @@ export default async function ProjectDetailPage({
           <h2 className="text-lg font-semibold text-slate-950">Project lifecycle</h2>
           <div className="flex flex-wrap items-center gap-3">
             <span className="status-pill status-not_assessed">{projectStageLabels[project.currentStage]}</span>
-            {access?.role !== "viewer" && previousStage && returnAction ? (
-              <form action={returnAction}>
-                <button type="submit" className="button-secondary">
-                  Return to {projectStageLabels[previousStage]}
-                </button>
-              </form>
-            ) : null}
             {currentGate ? (
               <Link
                 href={`/projects/${project.id}/gates/${encodeURIComponent(currentGate.id)}`}

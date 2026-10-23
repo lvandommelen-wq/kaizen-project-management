@@ -589,11 +589,13 @@ async function assertOperationalSchema(client) {
            '015_deliverables_only_methodology.sql',
            '016_remove_obsolete_procurement_teco.sql',
            '017_gate_matrix_review_confirmation.sql',
-           '018_add_project_site_organization_ehs_plan.sql'
-         )`,
+            '018_add_project_site_organization_ehs_plan.sql',
+            '019_access_management_foundation.sql',
+            '020_single_package_action_scope.sql'
+          )`,
   );
-  if (result.rowCount !== 14) {
-    throw new Error("Operational migrations 004, 005, and 007 through 018 have not all been applied to the target database.");
+  if (result.rowCount !== 16) {
+    throw new Error("Operational migrations 004, 005, and 007 through 020 have not all been applied to the target database.");
   }
 }
 

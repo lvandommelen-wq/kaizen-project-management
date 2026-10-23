@@ -1,6 +1,8 @@
 import { notFound } from "next/navigation";
 import { getApplicabilityReview } from "@/lib/applicability";
-import { getCurrentProjectRole } from "@/lib/authorization";
+import { requireInternalUser } from "@/lib/authorization";
+import { accessPermissionAllows } from "@/lib/access-permissions";
+import { getAuthorizedPackageContext } from "@/lib/package-access";
 import { applicabilityValues, type Applicability } from "@/lib/gates";
 import {
   createApplicabilityItemAction,
@@ -14,8 +16,14 @@ export const dynamic = "force-dynamic";
 export default async function PackageApplicabilityPage({ params, searchParams }: PageProps<"/projects/[projectId]/packages/[packageId]/applicability">) {
   const { projectId, packageId } = await params;
   const query = await searchParams;
-  const access = await getCurrentProjectRole(projectId);
-  if (!access) notFound();
+  const user = await requireInternalUser();
+  const context = await getAuthorizedPackageContext({
+    user,
+    projectId,
+    packageId,
+    module: "deliverables",
+  });
+  if (!context) notFound();
   const review = await getApplicabilityReview(projectId, packageId);
   if (!review) notFound();
   const projectPackage = review.entity as { packageCode: string; packageName: string };
@@ -23,8 +31,14 @@ export default async function PackageApplicabilityPage({ params, searchParams }:
 
   return (
     <ApplicabilityReview
-      backHref={`/projects/${projectId}/packages/${packageId}`}
-      canEdit={access.role !== "viewer" && !review.methodologyAwaitingApproval}
+      backHref={accessPermissionAllows(context.permissions.overview, "read")
+        ? `/projects/${projectId}/packages/${packageId}`
+        : "/projects"}
+      backLabel={accessPermissionAllows(context.permissions.overview, "read")
+        ? "Current package"
+        : "All projects"}
+      canEdit={accessPermissionAllows(context.permissions.deliverables, "read_write")
+        && !review.methodologyAwaitingApproval}
       changes={review.changes}
       scopeLabel={`${projectPackage.packageCode} - ${projectPackage.packageName}`}
       gates={review.gates}

@@ -15,10 +15,11 @@ import {
   withdrawPackageGateSubmissionAction,
 } from "@/app/projects/gate-actions";
 import { getGateDeliverables } from "@/lib/deliverables";
-import { getPackage, packageStageLabels } from "@/lib/packages";
-import { getGateActions } from "@/lib/project-actions";
-import { getProject } from "@/lib/projects";
-import { getCurrentProjectRole } from "@/lib/authorization";
+import { packageStageLabels } from "@/lib/packages";
+import { requireInternalUser } from "@/lib/authorization";
+import { getAuthorizedGateActionView } from "@/lib/action-register";
+import { accessPermissionAllows } from "@/lib/access-permissions";
+import { getAuthorizedPackageContext } from "@/lib/package-access";
 import { getActiveGateReviewIdentityLinkCandidates } from "@/lib/operational/postgres";
 import { getAwaitingGateReviewCycle, getGateSubmissionIssues } from "@/lib/gates";
 import { getOperationalDataBackend } from "@/lib/operational/backend";
@@ -34,39 +35,62 @@ export default async function PackageGatePage({
   const { projectId, packageId, gateId } = await params;
   const query = await searchParams;
   const resolvedGateId = decodeURIComponent(gateId);
-  const access = await getCurrentProjectRole(projectId);
-  if (!access) notFound();
-  const project = await getProject(projectId);
-
-  if (!project) {
-    notFound();
-  }
-
-  const projectPackage = await getPackage(project.id, packageId);
+  const user = await requireInternalUser();
+  const context = await getAuthorizedPackageContext({
+    user,
+    projectId,
+    packageId,
+    module: "gate_reviews",
+  }) ?? await getAuthorizedPackageContext({
+    user,
+    projectId,
+    packageId,
+    module: "deliverables",
+  });
+  if (!context) notFound();
+  const { project, projectPackage, permissions, governanceAuthority, projectRole } = context;
   const gate = projectPackage?.gates.find((gate) => gate.id === resolvedGateId);
 
   if (!projectPackage || !gate) {
     notFound();
   }
 
-  const matrixReview = getOperationalDataBackend() === "postgres"
+  const canReadGateReviews = accessPermissionAllows(permissions.gate_reviews, "read");
+  const canManageGateReviews = accessPermissionAllows(permissions.gate_reviews, "read_write");
+  const canReadOverview = accessPermissionAllows(permissions.overview, "read");
+  const canReadDeliverables = accessPermissionAllows(permissions.deliverables, "read");
+  const canEditDeliverables = accessPermissionAllows(permissions.deliverables, "read_write");
+  const matrixReview = canReadGateReviews && getOperationalDataBackend() === "postgres"
     ? await getGateMatrixReview(project.id, projectPackage.id, gate.id)
     : null;
-  if (getOperationalDataBackend() === "postgres" && !matrixReview) notFound();
+  if (canReadGateReviews && getOperationalDataBackend() === "postgres" && !matrixReview) notFound();
 
-  const applicabilityReview = gate.stageId === "definition" && getOperationalDataBackend() === "postgres"
+  const shouldLoadDeliverables = canReadDeliverables || canManageGateReviews;
+  const applicabilityReview = shouldLoadDeliverables
+    && gate.stageId === "definition" && getOperationalDataBackend() === "postgres"
     ? await getApplicabilityReview(project.id, projectPackage.id)
     : null;
   const applicabilityGate = applicabilityReview?.gates.find(
     (entry) => entry.gate.id === gate.id,
   );
   const readinessGate = applicabilityGate?.gate ?? gate;
-  const deliverables = applicabilityGate?.deliverables
-    ?? await getGateDeliverables(project.id, projectPackage.id, readinessGate.id);
+  const deliverables = shouldLoadDeliverables
+    ? applicabilityGate?.deliverables
+      ?? await getGateDeliverables(project.id, projectPackage.id, readinessGate.id)
+    : [];
   const applicabilityEntryDeliverable = deliverables.find(
     (deliverable) => deliverable.templateId === "package_stage_gate_applicability_matrix",
   );
-  const gateActions = await getGateActions(project.id, readinessGate.id);
+  const actionView = await getAuthorizedGateActionView({
+    user,
+    projectId: project.id,
+    packageId: projectPackage.id,
+    gateId: readinessGate.id,
+    legacyPermission: permissions.actions ?? "read",
+  });
+  const canReadActions = accessPermissionAllows(actionView.permission, "read");
+  const canWriteActions = accessPermissionAllows(actionView.permission, "read_write");
+  const gateActions = actionView.actions;
   const submissionIssues = [
     ...getGateSubmissionIssues(
       readinessGate,
@@ -81,7 +105,7 @@ export default async function PackageGatePage({
   ];
   const awaitingCycle = getAwaitingGateReviewCycle(readinessGate);
   const activeIdentityLinkCandidates = getOperationalDataBackend() === "postgres"
-    && access.role === "owner" && awaitingCycle
+    && projectRole === "owner" && awaitingCycle
     ? await getActiveGateReviewIdentityLinkCandidates({
         projectId: project.id,
         packageId: projectPackage.id,
@@ -90,19 +114,46 @@ export default async function PackageGatePage({
       })
     : [];
   const submittedCycleNumber = parseCycleNumber(query.submitted);
+  const currentStageIndex = projectPackage.gates.findIndex(
+    (candidate) => candidate.stageId === projectPackage.currentStage,
+  );
+  const currentStageGate = projectPackage.gates[currentStageIndex];
+  const canReopenGate = governanceAuthority !== null
+    && canManageGateReviews
+    && projectPackage.gates[currentStageIndex - 1]?.id === gate.id
+    && (gate.status === "approved" || gate.status === "approved_with_actions")
+    && !projectPackage.gates.some((candidate) => candidate.reapprovalRequired)
+    && currentStageGate?.status !== "submitted_for_approval"
+    && currentStageGate?.status !== "approved"
+    && currentStageGate?.status !== "approved_with_actions";
 
   return (
     <GateDetail
-      backHref={`/projects/${project.id}/packages/${projectPackage.id}`}
-      backLabel="Package"
+      backHref={canReadOverview
+        ? `/projects/${project.id}/packages/${projectPackage.id}`
+        : canReadDeliverables
+          ? `/projects/${project.id}/packages/${projectPackage.id}/applicability`
+          : "/projects"}
+      backLabel={canReadOverview
+        ? "Current package"
+        : canReadDeliverables
+          ? "Deliverables"
+          : "All projects"}
       contextLabel={`${projectPackage.packageCode} - ${projectPackage.packageName}`}
       applicabilityHref={`/projects/${project.id}/packages/${projectPackage.id}/applicability`}
       applicabilityEntryDeliverableId={applicabilityEntryDeliverable?.id}
-      actionRegisterHref={`/projects/${project.id}/actions?packageId=${encodeURIComponent(projectPackage.id)}`}
+      actionRegisterHref={`/projects/${project.id}/packages/${projectPackage.id}/actions`}
       approvalError={parseQueryValue(query.approvalError)}
-      canEdit={access.role !== "viewer"}
-      canManageActiveIdentityLinks={access.role === "owner"}
-      canWithdrawSubmission={access.role === "owner"}
+      canManageGateReviews={canManageGateReviews}
+      canReadGateReviews={canReadGateReviews}
+      canReadDeliverables={canReadDeliverables}
+      canEditDeliverables={canEditDeliverables}
+      canReadActions={canReadActions}
+      canWriteActions={canWriteActions}
+      canManageActiveIdentityLinks={projectRole === "owner"}
+      canWithdrawSubmission={governanceAuthority !== null}
+      canRetryInvitations={canManageGateReviews}
+      canReopenGate={canReopenGate}
       activeIdentityLinkCandidates={activeIdentityLinkCandidates}
       invitationFailureCount={parsePositiveInteger(query.invitationFailures)}
       approvalResponseAction={respondToPackageGateReviewAction.bind(
@@ -135,7 +186,7 @@ export default async function PackageGatePage({
         projectPackage.id,
         gate.id,
       )}
-      deliverables={deliverables}
+      deliverables={canReadDeliverables ? deliverables : []}
       gate={readinessGate}
       gateActions={gateActions}
       gateActionPackageId={projectPackage.id}

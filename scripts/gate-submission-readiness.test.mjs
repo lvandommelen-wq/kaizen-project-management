@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   createGates,
+  deriveStageDeliverableProtection,
   getGateSubmissionIssues,
   getScopeApplicabilitySubmissionIssues,
 } from "../src/lib/gates.ts";
@@ -58,6 +59,69 @@ test("new Gates have no active Criteria", () => {
   }]);
 
   assert.deepEqual(gates[0].criteria, []);
+});
+
+test("Stage Deliverable protection distinguishes completed evidence from next-Stage configuration", () => {
+  assert.deepEqual(
+    deriveStageDeliverableProtection(
+      { status: "approved", reapprovalRequired: false },
+      null,
+    ),
+    {
+      deliverableConfigurationLocked: true,
+      deliverableCompletionLocked: true,
+    },
+  );
+  assert.deepEqual(
+    deriveStageDeliverableProtection(
+      { status: "not_submitted", reapprovalRequired: false },
+      { status: "approved" },
+    ),
+    {
+      deliverableConfigurationLocked: true,
+      deliverableCompletionLocked: false,
+    },
+  );
+  assert.deepEqual(
+    deriveStageDeliverableProtection(
+      { status: "not_submitted", reapprovalRequired: true },
+      { status: "approved" },
+    ),
+    {
+      deliverableConfigurationLocked: false,
+      deliverableCompletionLocked: false,
+    },
+  );
+  assert.deepEqual(
+    deriveStageDeliverableProtection(
+      { status: "returned_for_rework", reapprovalRequired: false },
+      { status: "approved" },
+    ),
+    {
+      deliverableConfigurationLocked: true,
+      deliverableCompletionLocked: false,
+    },
+  );
+  assert.deepEqual(
+    deriveStageDeliverableProtection(
+      { status: "returned_for_rework", reapprovalRequired: true },
+      { status: "approved" },
+    ),
+    {
+      deliverableConfigurationLocked: false,
+      deliverableCompletionLocked: false,
+    },
+  );
+  assert.deepEqual(
+    deriveStageDeliverableProtection(
+      { status: "submitted_for_approval", reapprovalRequired: true },
+      { status: "approved" },
+    ),
+    {
+      deliverableConfigurationLocked: true,
+      deliverableCompletionLocked: true,
+    },
+  );
 });
 
 test("default Deliverables retain acceptance-requirement validation", () => {

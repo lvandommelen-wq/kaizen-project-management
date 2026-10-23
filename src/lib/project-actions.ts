@@ -606,20 +606,41 @@ function parseStatus(value: FormDataEntryValue | null) {
   return normalized as ProjectActionStatus;
 }
 
-function parsePackageIds(formData: FormData, validPackageIds: string[]) {
+export function parseProjectActionPackageIds(
+  formData: FormData,
+  validPackageIds?: string[],
+) {
+  if (formData.has("scopePackageId")) {
+    const submitted = formData.getAll("scopePackageId").map(String);
+    if (submitted.length !== 1) {
+      throw new Error("Select one valid Action scope.");
+    }
+    const packageId = submitted[0].trim();
+    const selected = packageId ? [packageId] : [];
+    if (formData.getAll("packageIds").length > 0) {
+      throw new Error("Submit only one Action scope.");
+    }
+    if (validPackageIds && selected.some((id) => !validPackageIds.includes(id))) {
+      throw new Error("The selected Package is invalid.");
+    }
+    return selected;
+  }
   const scope = String(formData.get("scope") ?? "project");
   if (scope === "project") return [];
   if (scope !== "packages") {
-    throw new Error("Select Project-level or Package(s) scope.");
+    throw new Error("Select Overall Project or Package scope.");
   }
 
   const selected = Array.from(
     new Set(formData.getAll("packageIds").map((value) => String(value))),
   );
   if (selected.length === 0) {
-    throw new Error("Select at least one Package for Package scope.");
+    throw new Error("Select one Package for Package scope.");
   }
-  if (selected.some((id) => !validPackageIds.includes(id))) {
+  if (selected.length > 1) {
+    throw new Error("An Action may reference at most one Package.");
+  }
+  if (validPackageIds && selected.some((id) => !validPackageIds.includes(id))) {
     throw new Error("One or more selected Packages are invalid.");
   }
   return selected;
@@ -643,7 +664,7 @@ export function parseProjectActionFormData(
       dueDate: parseDate(formData.get("dueDate")),
       status: parseStatus(formData.get("status")),
       priority: parsePriority(formData.get("priority")),
-      packageIds: parsePackageIds(formData, validPackageIds),
+      packageIds: parseProjectActionPackageIds(formData, validPackageIds),
       governanceTierId: parseGovernanceTierId(
         formData.get("governanceTierId"),
         validGovernanceTierIds,
@@ -820,6 +841,7 @@ export async function createManualProjectAction(
   input: ProjectActionInput,
   loggedBy: ActionActor,
 ) {
+  assertSingleProjectActionPackage(input.packageIds);
   if (getOperationalDataBackend() === "postgres") {
     return postgresOperational.createManualProjectAction(projectId, input, loggedBy);
   }
@@ -874,16 +896,17 @@ export async function createGateProjectAction(
   projectId: string,
   gateId: string,
   packageIds: string[],
-  packageAssociationLocked: boolean,
+  _packageAssociationLocked: boolean,
   input: GateProjectActionInput,
   loggedBy: ActionActor,
 ) {
+  assertSingleProjectActionPackage(packageIds);
   if (getOperationalDataBackend() === "postgres") {
     return postgresOperational.createGateProjectAction(
       projectId,
       gateId,
       packageIds,
-      packageAssociationLocked,
+      true,
       input,
       loggedBy,
     );
@@ -915,7 +938,7 @@ export async function createGateProjectAction(
       governanceTierId: null,
       gateId,
       source: "gate",
-      packageAssociationLocked,
+      packageAssociationLocked: true,
       loggedBy,
       dateLogged: now,
       closingDate: null,
@@ -941,6 +964,7 @@ export async function updateProjectAction(
   input: ProjectActionInput,
   updatedBy: ActionActor,
 ) {
+  assertSingleProjectActionPackage(input.packageIds);
   if (getOperationalDataBackend() === "postgres") {
     const action = await postgresOperational.updateProjectAction(
       projectId,
@@ -963,7 +987,7 @@ export async function updateProjectAction(
       throw new Error("Use Close to close an Action.");
     }
 
-    const nextPackageIds = action.packageAssociationLocked
+    const nextPackageIds = action.source === "gate" || action.packageAssociationLocked
       ? action.packageIds
       : input.packageIds;
     const nextGateId = action.source === "gate" ? action.gateId : input.gateId;
@@ -1015,6 +1039,12 @@ export async function updateProjectAction(
     await writeStore(store);
     return action;
   });
+}
+
+function assertSingleProjectActionPackage(packageIds: string[]) {
+  if (packageIds.length > 1 || new Set(packageIds).size !== packageIds.length) {
+    throw new Error("An Action may reference at most one Package.");
+  }
 }
 
 export async function addProjectActionUpdate(

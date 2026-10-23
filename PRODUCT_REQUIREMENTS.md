@@ -313,7 +313,7 @@ Examples:
 
 An overall plant Layout may be Project-level and referenced by several Packages.
 
-An Action may apply simultaneously to the Filling Machine and Conveyor Packages.
+Actions are a deliberate exception: an Action is either Overall Project scoped or associated with exactly one Package, never multiple Packages.
 
 A Requirement may require implementation or Verification across several Packages.
 
@@ -1368,7 +1368,13 @@ Template-created default items must remain traceable and must not be deleted mer
 
 ## 15.2 Living Applicability Matrix Review
 
-The single Project or Package Stage-Gate Deliverable Applicability Matrix is a living governance record. It is initially tailored across the complete active lifecycle during Project Initiation or Package Definition and remains available for authorized maintenance throughout the lifecycle. The existing Project and Package Applicability Matrix Deliverables remain locked and Applicable. Their completion records the initial tailoring activity and is independent of later Gate confirmations; it must not be reset when another Gate is prepared.
+The single Project or Package Stage-Gate Deliverable Applicability Matrix is a living governance record. It is initially tailored across the complete active lifecycle during Project Initiation or Package Definition and remains available throughout the lifecycle. The existing Project and Package Applicability Matrix Deliverables remain locked and Applicable. Their completion records the initial tailoring activity and is independent of later Gate confirmations; it must not be reset when another Gate is prepared.
+
+Submitting or formally approving a Gate protects two related Deliverable baselines. First, the Gate's own Stage is the submitted or approved completed-Stage baseline: its stable Deliverable set, default/custom classification, titles, stored acceptance metadata, applicability decisions, Not Applicable justifications, completion statuses and completion evidence are frozen. Second, the Gate protects the Deliverable-configuration baseline for the next active Stage resolved by the lifecycle rules: its stable Deliverable set, default/custom classification, titles, stored acceptance metadata, applicability decisions and Not Applicable justifications are frozen. While either protection applies, Project Owners, Package Leads, ordinary users and direct mutation calls must not bypass it.
+
+Normal execution progress remains permitted for an active Stage whose configuration is protected only by the preceding submitted or approved Gate. Its Deliverable completion statuses may continue to move between Not Started, In Progress and Completed without changing or invalidating that next-Stage configuration baseline. Once the active Stage's own Gate is submitted or approved, those completion statuses and the associated completion evidence are also frozen.
+
+Future Stages that have not yet been baselined remain editable. Reopening the governing Gate is the only way to revise its own approved completed-Stage baseline and the next-Stage baseline governed by that Gate. During preparation, the exact Gate carrying `reapproval_required` may revise its own Stage configuration and completion records even when the preceding Gate remains approved; this controlled exception does not unlock that preceding Gate or any unrelated earlier Stage. Reopening also unlocks the next-Stage Deliverable configuration governed by the reopened Gate. Resubmission ends the exception and freezes both configurations again. Existing Deliverable IDs and completion statuses must not be reset during reopening or reapproval.
 
 Before every future eligible Project or Package Gate submission, an authenticated Project editor or owner must explicitly confirm the matrix configuration relevant to that Gate. Merely opening or viewing the matrix does not confirm it. For a non-Closure Gate, the review focuses on the next applicable Stage selected by the existing lifecycle rules. A Project with Validation disabled must skip Validation. Package review follows the configured Package lifecycle without introducing new Stage-skipping behavior. At Closure, the confirmation covers the final active lifecycle matrix rather than a nonexistent next Stage.
 
@@ -1695,6 +1701,18 @@ This includes, where applicable:
 
 Every new Review Cycle must contain the complete current Project or Package Stage-Gate Deliverable Applicability Matrix and its explicit Gate review confirmation. These snapshots must identify default and custom items, descriptions, applicability decisions and Not Applicable justifications, together with the reviewed Stage or final lifecycle, authenticated reviewer, confirmation timestamp and deterministic fingerprint. Later live changes must not modify the snapshot. Historical Review Cycles without a matrix confirmation remain valid and readable and must not be rewritten.
 
+The normal frozen Review Cycle presentation uses one shared Project, Package and Approver view of this immutable evidence. For a Stage-transition Gate it presents two columns:
+
+- **Current Stage — Completed Deliverables** contains only frozen current-stage Deliverables with explicit `Applicable` applicability and explicit `Completed` status;
+- **Next Stage — Agreed Deliverables** contains only frozen matrix items with explicit Deliverable type and explicit `Applicable` applicability for the confirmed next Stage; and
+- the presentation identifies the reviewed Stage, authenticated reviewer and confirmation timestamp.
+
+Not Applicable items, acceptance requirements, next-Stage completion statuses and technical fingerprints are not displayed in these normal frozen-evidence lists. The underlying snapshots, including applicability decisions, justifications, descriptions and fingerprints, remain unchanged as technical governance evidence.
+
+A Closure Gate instead presents **Final Applicability Matrix — Confirmed** with only the final lifecycle review confirmation attribution. It does not repeat the full lifecycle matrix.
+
+Historical compatibility must be strict. The presentation must not infer missing applicability, completion or confirmation values. If older frozen evidence cannot be classified reliably for one of the normal presentation sections, it shows a concise legacy-evidence notice rather than describing a filtered or empty list as complete. Historical Criteria, accepted Actions, approval and withdrawal history, and authenticated or email-OTP response functionality remain available.
+
 The application should retain immutable references to the exact revisions/versions used for the Gate Decision.
 
 Example:
@@ -1825,7 +1843,15 @@ The final signed/approved Report should itself be treated as a controlled record
 
 ## 15.15 Gate Review Cycles and Reopening
 
-If an approved or rejected Gate needs to be formally reconsidered, the application should eventually support reopening the Gate or initiating a new Gate Review cycle.
+Gate reopening is the only supported backward lifecycle operation. A Project or Package may reopen only the immediately preceding approved Gate that caused progression into its current active Stage. Reopening and the one-Stage backward transition are one transactional operation; no independent Stage rollback operation or direct Stage-decrement API is permitted.
+
+Every reopening requires a non-whitespace reason and an authenticated authorized actor. The audit event must record the actor, timestamp, reason, Gate, previous Stage and target Stage. Project Gate reopening is restricted to a Project Owner. Package Gate reopening is restricted to a Project Owner or the exact active internal Package Lead with Gate Reviews Read & Write for that Package.
+
+Reopening sets the Gate's persistent `reapproval_required` state, returns the Project or Package exactly one active Stage backward and permits controlled revision of both the reopened Gate's own Stage configuration and completion records and the next-Stage Deliverable configuration previously baselined by that Gate. This exception applies only while that exact reopened Gate is in preparation; ordinary Stage navigation cannot enable it. The preceding approved Gate and every unrelated earlier approved Stage remain protected. Active lifecycle resolution must respect optional Validation and all existing Stage-skipping rules. Earlier approved Gates cannot be reopened directly.
+
+Only one Gate in a Project or Package scope may require reapproval at a time. A further backward reopening is prohibited until the reopened Gate has been resubmitted and formally approved. Withdrawal or return for rework does not clear `reapproval_required`. Only successful renewed formal approval clears it and resumes normal forward progression. Gate Action reconciliation must not restore a reopened Gate to Approved or Approved with Actions before that renewed approval.
+
+While a Gate is Submitted for Approval, its own Stage Deliverable configuration and completion evidence and its reviewed next-Stage Deliverable configuration are frozen against live mutation. Withdrawal or return for rework removes the submission lock, but a Stage configuration protected by another approved Gate remains locked unless the exact Stage is operating under the controlled `reapproval_required` preparation exception described above.
 
 While a Project or Package Gate has an active Review Cycle in `Submitted for Approval`, a Project Owner may withdraw that cycle even when one or more Approvers have already responded, provided the Gate has not reached final approval and the related Stage has not progressed. Every withdrawal requires a reason containing non-whitespace text and must be attributed to the authenticated Project Owner.
 
@@ -1851,11 +1877,7 @@ Gate Review 2
 
 Both review cycles remain part of the Gate history.
 
-Similarly, reopening an already approved Gate should not invalidate or delete the historical approval record without explicit controlled governance.
-
-Moving a Project or Package backwards in its lifecycle and reopening a Gate are related but distinct governance actions and should not be silently treated as the same operation.
-
-The detailed reopening workflow should be developed incrementally.
+Reopening an already approved Gate must not invalidate, replace or delete its historical approval record. Existing Review Cycles, frozen evidence, Approver snapshots, responses, signatures, OTP evidence, Gate Actions, Action decision references and audit history remain immutable. Resubmission creates a new Review Cycle containing the revised live configuration. Its approval establishes the replacement baseline without rewriting any preceding baseline.
 
 ---
 
@@ -2053,46 +2075,98 @@ SharePoint file version and engineering Document revision are related but should
 
 ---
 
-# 18. SharePoint Access and Permission Management
+# 18. Application Access and Permission Management
 
-The application should provide a central interface for managing Project and Package access.
+PostgreSQL is the authoritative source for application authorization. Authentication alone, including membership of the configured Microsoft Entra tenant, does not grant access to a Project or Package.
 
-The Project Manager or authorized administrator should not normally need to configure the same permissions manually in multiple SharePoint locations.
+Authorization is determined server-side from three independent dimensions:
 
-Gate Approvers who are not otherwise Project members may be granted only the minimum temporary or scoped access required to securely review and approve the applicable Gate Review and its supporting evidence.
+* **Scope** — Entire Project including Packages, Overall Project only, or one Specific Package;
+* **Module** — for example Overview, Actions, Risks, Issues, Decisions, Changes/MOC, Budget, Planning, Deliverables, Gate Reviews or Documents; and
+* **Permission** — No Access, Read, or Read & Write.
 
-Gate approval access must not automatically grant broader access to unrelated Project or Package information.
+No Access is represented by the absence of a positive module permission. An Entire Project scope is an explicit broad assignment; Overall Project access does not imply access to any Package, and a Specific Package assignment does not imply access to the Overall Project or another Package. All route, query and mutation authorization must be enforced on the server against current PostgreSQL state rather than client-side visibility or permission claims stored in an authentication session.
 
-## 18.1 Central Access Configuration
+## 18.1 Administrative Authority
 
-The application should eventually provide a central Stakeholder / Access table.
+The protected Project Owner is the top-level authority and retains complete Project and Package oversight. Existing Project Owner protection remains in force.
 
-Conceptually, access may be configured using:
+Project creation is a separate application-level capability assigned explicitly to active internal Users. Project ownership, Project Access Manager authority and Package Lead authority do not independently grant Project creation. The Project overview, New Project route, Server Actions and persistence service must all enforce the same current PostgreSQL authorization. Existing authorized Project creators become the protected Owner of Projects they create through the established creation workflow.
 
-* User / Group
-* Organization
-* Project
-* Package(s)
-* Role
-* Visibility/access profile
-* Application permissions
-* SharePoint permissions
+A Project Owner may designate a **Project Access Manager** to administer collaborator grants and external access requests without granting ownership or authority to modify protected Project Owners.
 
-Examples of roles may include:
+A Project Owner or Project Access Manager may designate a **Package Lead** for one Specific Package. Package Leads may manage ordinary collaborators only within that Package and only up to the Package Lead's own implemented module permissions. Package Leads cannot grant Project-wide access, target another Package, elevate themselves, appoint another Package Lead, alter a Project Owner, approve external access, or bypass identity verification. Package Contributors do not receive access-management authority automatically. Governance Tiers 1–4 remain operational escalation structures and are not authorization roles.
 
-* Project Manager
-* Project Team
-* Package Owner
-* Customer Stakeholder
-* Supplier
-* Quality
-* Validation
-* Steering Committee
-* Read-only stakeholder
+## 18.2 Access Management Interfaces
 
-Roles and access profiles should eventually be configurable.
+The application will provide:
 
-## 18.2 Permission Synchronization
+* **Project → Access Management** for protected Owners and authorized Project Access Managers; and
+* **Package → Access Management** for protected Owners, Project Access Managers and the applicable Package Lead.
+
+These interfaces will use business-friendly labels and compact layouts to show active assignments, scope, module permissions, delegated authority, pending requests and append-only permission history. They must not display internal UUIDs, Entra Object IDs or other technical identity references.
+
+The internal Access Management workflow allows an authorized administrator to select an existing active, authenticated internal application User by name or email, choose an approved scope, assign implemented module permissions, and optionally designate the User as Project Access Manager or Package Lead. Arbitrary email entry and identity matching by email are not permitted. If the intended person has no validated application identity, they must first sign in through Microsoft Entra.
+
+Project Owners may manage all internal grants. Project Access Managers may manage ordinary collaborators and Package Leads but cannot appoint, modify or remove a Project Access Manager or alter protected Project Owner access. Package Leads may manage only ordinary collaborators within their own Package, cannot modify themselves, and cannot grant more module access than they hold. Removing the final Package Lead is allowed only after an explicit warning and confirmation that the Package will have no designated Lead.
+
+Package Access Management distinguishes direct Package permissions from inherited Entire Project permissions. The effective permission is the highest positive applicable permission. Editing or revoking a direct Package grant never changes a broader Entire Project grant, and the application does not implement negative permission overrides.
+
+## 18.3 Application Collaborators and External Approval
+
+Application collaborators use Microsoft Entra and Better Auth with stable verified PostgreSQL User identities. Existing authenticated Users may receive active grants directly. A proposed external collaborator remains inactive until a Project Owner or Project Access Manager approves the requested scope and permissions and the approved request is securely linked to a verified Microsoft identity. Email matching alone is insufficient, and administrators must not manually enter Entra Object IDs.
+
+External requests record the collaborator's name, email, organization, requested scope, requested modules and permissions, requester and request date, PM decision and date, and identity-link/onboarding status. Microsoft Graph B2B invitation automation is not part of the initial implementation.
+
+Gate Approver email OTP authentication remains independent. An OTP session authorizes only its exact frozen Review Cycle assignment and never creates a persistent Project or Package grant.
+
+## 18.4 Phased Rollout and Shared Architecture
+
+The permission schema and server-only authorization service are shared foundations for future Registers and modules. A module must not become assignable until its routes, queries and mutations enforce the corresponding permission.
+
+The initial rollout is deliberately phased:
+
+1. PostgreSQL access-grant, permission and request persistence plus the shared authorization service;
+2. Project and Package Access Management interfaces and delegated authority;
+3. full server-side integration of the central Action Register with fixed Package views;
+4. external request approval and verified identity onboarding; and
+5. final migration, security and historical-compatibility verification.
+
+Only the **Actions** module is initially assignable. The central Action Register enforces live Actions permissions server-side for every read and mutation. Project Owners retain implicit full Actions access without an `access_grant`; migration-created legacy editor and viewer grants retain their approved Read & Write and Read compatibility. No Actions assignment grants access to Project overview data, Gate workflows, Deliverables, Budget or another operational module. External requests and onboarding remain deferred.
+
+An authenticated User with Actions Read may open the Project Action Register and see the aggregation of only the Overall Project and Package scopes for which that permission is effective. Counts, search results, filters, Action details, comments, history and linked labels must be derived only from those authorized Actions. A Package Action Register is a fixed view of the same central data and exposes only its authorized Package. Package-only navigation may identify the Project and Package by number and name but must not expose unrelated Project metadata, Packages or operational routes.
+
+Actions Read & Write is required for creation, field changes, comments, status changes, closing, reopening, deletion, assignment changes and record linking. Authorization is re-evaluated from current PostgreSQL state in the mutation transaction. A non-Owner moving an ordinary Action between scopes requires Read & Write in both source and destination; a Project Owner may move it to any valid Project scope. A fixed Package view rejects every move outside that Package regardless of other permissions. Revocation takes effect on the next read or mutation.
+
+Gate Action creation requires both the existing Gate workflow authority and Actions Read & Write in the Gate's fixed scope. Project Gate Actions are always Overall Project scoped, while Package Gate Actions are always scoped to their Gate Package. Their scope cannot be changed manually. Actions permission does not grant Gate submission, approval, withdrawal or Stage progression authority, and all frozen Review Cycle evidence, decision references, reconciliation and deletion protections remain authoritative.
+
+## 18.4.1 Full Package Access and Governance
+
+The implemented Package modules are **Overview**, **Deliverables**, **Gate Reviews** and **Actions**. A module becomes assignable only after every related Package route, loader and mutation enforces its live PostgreSQL permission. Other schema modules remain unavailable until their own server-side integration is complete.
+
+A Package Lead is an active internal User with a Specific Package grant, `package_lead` authority and Read & Write permission for every implemented Package module. This provides full operational access to that Package without granting access to Overall Project information or another Package. Project Owners retain implicit full Package access. Project Access Manager authority does not itself grant Package operational access.
+
+Ordinary Package Contributors receive only their explicitly assigned positive module permissions. Read and Read & Write are independent per module: for example, Actions Read does not grant Deliverables access, and Deliverables Read & Write does not grant Actions mutation access. Contributors receive no delegated administration, Gate withdrawal or Gate reopening authority merely through module permissions.
+
+Overview Read permits the Package overview and supported Package details; Overview Read & Write permits editing supported Package details. Deliverables permissions control Package Deliverables and the Package Applicability Matrix. Gate Reviews permissions control Package Gate preparation and review administration. Actions permissions retain the central fixed-Package Action Register behavior. Package Gate Action creation requires both Gate Reviews Read & Write and Actions Read & Write for the exact Package.
+
+An active internal Package Lead with Gate Reviews Read & Write for the exact Package may prepare and submit Package Gates, configure Package Gate Approvers, confirm the Package Applicability Matrix review, reopen the immediately preceding eligible approved Package Gate and retry permitted invitations. Reopening requires a reason and performs the single permitted one-Stage backward transition. Formal approval and signature remain independent and require an exact frozen approver assignment and the existing authenticated Review workflow.
+
+The same Package Lead may use the existing withdrawal workflow for an active submitted Package Review Cycle, including after partial approval. Withdrawal requires the existing reason and preserves recorded responses, frozen evidence, actor, timestamp, reason, pending-approval cancellation and creation of a new Review Cycle on resubmission. Gate withdrawal returns the Gate to Not Submitted and does not change the Package Stage.
+
+There is no separate Package Stage rollback operation. A Project Owner or the exact active internal Package Lead with Gate Reviews Read & Write may move a Package backward only by reopening its immediately preceding eligible approved Gate. Package Leads cannot alter the Project Stage, another Package or an earlier approved Gate.
+
+External collaborators and ordinary Package Contributors do not receive Package Lead withdrawal or Gate reopening authority automatically. Package deletion, Project-level governance, Project-level Gate workflows and Project Stage transitions remain separately protected.
+
+Package-only reads use Package-scoped projections. They may disclose the Project number and name for context but must not disclose the Project Budget, Overall Project Actions, other Packages, confidential Project governance, unauthorized documents or unrelated Gate information.
+
+Navigation uses the labels **All projects**, **Current project** and **Current package** consistently. Destinations are rendered only when currently authorized. All projects may show restricted Project and Package entry points, Current package opens the authorized Package overview, and Current project is omitted when the User lacks Project overview authority. Duplicate links to the page already being viewed are avoided.
+
+On **All projects**, a delegated Package with Overview access uses one **Open package** entry point to its authorized Package overview instead of separate module buttons. An Actions-only User without Package Overview access retains one minimal authorized Action Register link. This navigation simplification must not broaden the User's effective permissions.
+
+Deliverable status styling is consistent on Project and Package Gate cards and Applicability Matrix views: Completed is green, Not Started and In Progress are amber, and Not Applicable is neutral grey. The styling applies to collapsed and expanded records and does not alter applicability or completion data.
+
+## 18.5 SharePoint Permission Synchronization — Future
 
 The application should eventually be capable of translating approved access configuration into corresponding SharePoint access.
 
@@ -2112,7 +2186,7 @@ may receive access to appropriate shared PKG-001 SharePoint content without rece
 * internal Decisions;
 * confidential Project information.
 
-## 18.3 Permission Architecture
+## 18.6 SharePoint Permission Architecture — Future
 
 The technical architecture should prefer manageable permission structures such as:
 
@@ -2124,7 +2198,7 @@ The technical architecture should prefer manageable permission structures such a
 
 The solution should avoid excessive unique permissions on individual files where a cleaner group/library/folder-based model is possible.
 
-## 18.4 Application and SharePoint Permissions
+## 18.7 Application and SharePoint Permissions
 
 Application permissions and SharePoint permissions should remain consistent.
 
@@ -2543,7 +2617,7 @@ Typical fields:
 * Priority
 * Status
 * Source
-* Related Package(s)
+* Scope — Overall Project or one Related Package
 * Current Governance Tier
 * Related Stage
 * Related Meeting
@@ -2554,7 +2628,11 @@ Typical fields:
 * Comments
 * Closure date
 
-An Action may relate to multiple Packages.
+Every Action belongs to one Project and is scoped either to the Overall Project or to exactly one Package. The application must maintain one central Action Register per Project; Package Action Registers are fixed, authorized views of that central register rather than separate databases.
+
+The Project Action Register aggregates only scopes where the current User has Actions Read. Its totals, quick views, searches and filter options must not include unauthorized Actions or Packages. The Package Action Register uses the same interface and business logic with its Package scope fixed for reads, creation and editing. Read-only Users may inspect Action details, comments and history but must not receive mutation controls.
+
+Ordinary Action scope changes require current Read & Write access to both source and destination unless the acting User is the protected Project Owner. Gate Action scope is immutable: a Project Gate Action remains Overall Project scoped and a Package Gate Action remains associated with exactly its Gate Package. Multiple Package associations are invalid and must be rejected by the interface, application service and PostgreSQL constraints.
 
 Actions should be easy to create and update.
 

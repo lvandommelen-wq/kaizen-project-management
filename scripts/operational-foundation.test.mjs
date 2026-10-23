@@ -163,9 +163,128 @@ test("migration files are ordered, named, and checksummed", async () => {
       "016_remove_obsolete_procurement_teco.sql",
       "017_gate_matrix_review_confirmation.sql",
       "018_add_project_site_organization_ehs_plan.sql",
+      "019_access_management_foundation.sql",
+      "020_single_package_action_scope.sql",
+      "021_full_package_access.sql",
+      "022_unified_gate_reopening.sql",
     ],
   );
   assert.ok(migrations.every((migration) => /^[0-9a-f]{64}$/.test(migration.checksum)));
+});
+
+test("access permission helpers are deny-by-default and ordered", async () => {
+  const {
+    accessPermissionAllows,
+    isAssignableAccessModule,
+    maximumAccessPermission,
+  } = await import("../src/lib/access-permissions.ts");
+
+  assert.equal(accessPermissionAllows(null, "read"), false);
+  assert.equal(accessPermissionAllows("read", "read"), true);
+  assert.equal(accessPermissionAllows("read", "read_write"), false);
+  assert.equal(accessPermissionAllows("read_write", "read"), true);
+  assert.equal(maximumAccessPermission([]), null);
+  assert.equal(maximumAccessPermission(["read", "read_write"]), "read_write");
+  assert.equal(isAssignableAccessModule("overview"), true);
+  assert.equal(isAssignableAccessModule("actions"), true);
+  assert.equal(isAssignableAccessModule("deliverables"), true);
+  assert.equal(isAssignableAccessModule("gate_reviews"), true);
+  assert.equal(isAssignableAccessModule("risks"), false);
+});
+
+test("Access and Action routes retain their approved authorization boundaries", async () => {
+  const actionSource = await readFile(
+    path.join(root, "src", "app", "projects", "access-actions.ts"),
+    "utf8",
+  );
+  assert.equal(
+    actionSource.match(/const actor = await requireInternalUser\(\);/g)?.length,
+    4,
+  );
+  assert.match(actionSource, /throw error;/);
+
+  const guardedPages = [
+    "page.tsx",
+    "applicability/page.tsx",
+    "edit/page.tsx",
+    "history/page.tsx",
+    "gates/[gateId]/page.tsx",
+    "packages/new/page.tsx",
+  ];
+  for (const relativePath of guardedPages) {
+    const pageSource = await readFile(
+      path.join(root, "src", "app", "projects", "[projectId]", relativePath),
+      "utf8",
+    );
+    assert.match(pageSource, /getCurrentProjectRole/);
+  }
+
+  const packageGuardedPages = [
+    "packages/[packageId]/page.tsx",
+    "packages/[packageId]/edit/page.tsx",
+    "packages/[packageId]/applicability/page.tsx",
+    "packages/[packageId]/gates/[gateId]/page.tsx",
+  ];
+  for (const relativePath of packageGuardedPages) {
+    const pageSource = await readFile(
+      path.join(root, "src", "app", "projects", "[projectId]", relativePath),
+      "utf8",
+    );
+    assert.match(pageSource, /getAuthorizedPackageContext/);
+    assert.doesNotMatch(pageSource, /getCurrentProjectRole/);
+  }
+
+  const projectActionsPage = await readFile(
+    path.join(root, "src", "app", "projects", "[projectId]", "actions", "page.tsx"),
+    "utf8",
+  );
+  const packageActionsPage = await readFile(
+    path.join(
+      root,
+      "src",
+      "app",
+      "projects",
+      "[projectId]",
+      "packages",
+      "[packageId]",
+      "actions",
+      "page.tsx",
+    ),
+    "utf8",
+  );
+  for (const pageSource of [projectActionsPage, packageActionsPage]) {
+    assert.match(pageSource, /requireInternalUser/);
+    assert.match(pageSource, /getActionRegisterView/);
+    assert.doesNotMatch(pageSource, /getCurrentProjectRole/);
+  }
+  assert.match(projectActionsPage, /getActionRegisterView\(user, projectId, null\)/);
+  assert.match(packageActionsPage, /getActionRegisterView\(user, projectId, packageId\)/);
+
+  const actionMutationSource = await readFile(
+    path.join(root, "src", "app", "projects", "action-actions.ts"),
+    "utf8",
+  );
+  assert.equal(actionMutationSource.match(/await requireInternalUser\(\)/g)?.length, 6);
+  assert.equal(actionMutationSource.match(/withAuthorizedActionCreation\(\{/g)?.length, 1);
+  assert.equal(actionMutationSource.match(/withAuthorizedActionMutation(?:<[^>]+>)?\(\{/g)?.length, 5);
+
+  const gateMutationSource = await readFile(
+    path.join(root, "src", "app", "projects", "gate-actions.ts"),
+    "utf8",
+  );
+  assert.equal(
+    gateMutationSource.match(/withCompatibleGateActionWriteAccess\(\{/g)?.length,
+    2,
+  );
+  assert.equal(
+    gateMutationSource.match(/withAuthorizedAccessMutation<ProjectAction>\(\{/g)?.length,
+    1,
+  );
+  assert.match(gateMutationSource, /module: "actions"/);
+  assert.match(gateMutationSource, /requestedPermission: "read_write"/);
+  assert.match(gateMutationSource, /withAuthorizedPackageGovernanceMutation/);
+  assert.match(gateMutationSource, /module: "gate_reviews"/);
+  assert.match(gateMutationSource, /module: "deliverables"/);
 });
 
 test("project permission roles enforce the approved hierarchy and owner-only operations", async () => {

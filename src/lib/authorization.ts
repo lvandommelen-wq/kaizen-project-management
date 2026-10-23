@@ -31,6 +31,25 @@ export async function requireInternalUser() {
   return user;
 }
 
+export async function canCreateProject(user?: CurrentUser) {
+  const actor = user ?? await requireInternalUser();
+  if (actor.accessClass !== "internal" || actor.status !== "active") return false;
+  if (getOperationalDataBackend() === "json") return true;
+
+  return withOperationalTransaction(async (client) => {
+    await assertProjectCreationSchema(client);
+    return loadProjectCreationAuthorization(client, actor.id, false);
+  });
+}
+
+export async function requireProjectCreationAuthorization() {
+  const user = await requireInternalUser();
+  if (!await canCreateProject(user)) {
+    throw new Error("You are not authorized to create Projects.");
+  }
+  return user;
+}
+
 export async function getCurrentProjectRole(projectId: string) {
   const user = await requireInternalUser();
   if (getOperationalDataBackend() === "json") {
@@ -87,6 +106,10 @@ export async function withAuthorizedProjectCreation<T extends { id: string }>(in
   if (getOperationalDataBackend() === "json") return input.operation(user);
 
   return withOperationalTransaction(async (client) => {
+    await assertProjectCreationSchema(client);
+    if (!await loadProjectCreationAuthorization(client, user.id, true)) {
+      throw new Error("You are not authorized to create Projects.");
+    }
     const project = await input.operation(user);
     await client.query(
       `INSERT INTO project_membership (project_id, user_id, role, created_at, updated_at)
@@ -101,6 +124,36 @@ export async function withAuthorizedProjectCreation<T extends { id: string }>(in
     });
     return project;
   });
+}
+
+async function loadProjectCreationAuthorization(
+  client: PoolClient,
+  userId: string,
+  lock: boolean,
+) {
+  const result = await client.query(
+    `SELECT 1
+     FROM project_creation_authorization AS creation_authorization
+     JOIN app_user ON app_user.id = creation_authorization.user_id
+     WHERE creation_authorization.user_id = $1
+       AND creation_authorization.revoked_at IS NULL
+       AND app_user.status = 'active'
+       AND app_user.access_class = 'internal'
+       AND app_user.last_authenticated_at IS NOT NULL
+     ${lock ? "FOR SHARE OF creation_authorization, app_user" : ""}`,
+    [userId],
+  );
+  return result.rowCount === 1;
+}
+
+async function assertProjectCreationSchema(client: PoolClient) {
+  const result = await client.query(
+    `SELECT 1 FROM identity_schema_migration
+     WHERE name = '021_full_package_access.sql'`,
+  );
+  if (result.rowCount !== 1) {
+    throw new Error("Project creation authorization migration 021 has not been applied.");
+  }
 }
 
 async function loadProjectRole(

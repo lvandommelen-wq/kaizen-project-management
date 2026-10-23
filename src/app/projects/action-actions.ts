@@ -1,315 +1,300 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { notFound, redirect } from "next/navigation";
-import { withAuthorizedProjectMutation } from "@/lib/authorization";
-import { getPackages, type ProjectPackage } from "@/lib/packages";
+import { redirect } from "next/navigation";
+import {
+  getActionGovernanceTierIds,
+  withAuthorizedActionCreation,
+  withAuthorizedActionMutation,
+} from "@/lib/action-register";
+import { requireInternalUser } from "@/lib/authorization";
 import {
   addProjectActionUpdate,
   closeProjectAction,
   createManualProjectAction,
   deleteProjectAction,
-  getProjectAction,
   parseActionTransitionFormData,
   parseActionUpdateFormData,
   parseProjectActionFormData,
+  parseProjectActionPackageIds,
   parseReopenStatus,
   reopenProjectAction,
   updateProjectAction,
   withGateWorkflowLock,
   withGovernanceTierWorkflowLock,
   type ProjectAction,
+  type ProjectActionDeletionResult,
 } from "@/lib/project-actions";
-import { getProject, type Project } from "@/lib/projects";
 
 export async function createManualProjectActionAction(
   projectId: string,
+  fixedPackageId: string | null,
   returnQuery: string,
   formData: FormData,
 ) {
-  await withAuthorizedProjectMutation({
+  const user = await requireInternalUser();
+  const packageIds = parseProjectActionPackageIds(formData);
+  const packageId = packageIds[0] ?? null;
+  const action = await withAuthorizedActionCreation({
+    user,
     projectId,
-    minimumRole: "editor",
-    audit: (action) => ({
+    packageId,
+    fixedPackageId: fixedPackageId ?? undefined,
+    audit: (created) => ({
       eventType: "action.created",
       resourceType: "action",
-      resourceId: action.id,
+      resourceId: created.id,
     }),
     operation: () => withGovernanceTierWorkflowLock(async () => {
-      const context = await getActionContext(projectId);
-      formData.set("actorName", context.project.projectManager);
+      const governanceTierIds = await getActionGovernanceTierIds(projectId);
+      setAuthenticatedActor(formData, user);
       formData.delete("gateId");
       const parsed = parseProjectActionFormData(
         formData,
-        context.packageIds,
-        context.governanceTierIds,
+        packageId ? [packageId] : [],
+        governanceTierIds,
       );
+      parsed.actor.userId = user.id;
       parsed.input.gateId = null;
       return createManualProjectAction(projectId, parsed.input, parsed.actor);
     }),
   });
 
-  revalidateActionRegister(projectId);
-  redirect(actionRegisterPath(projectId, returnQuery));
+  revalidateActionRegister(projectId, action);
+  redirect(actionRegisterPath(projectId, fixedPackageId, returnQuery));
 }
 
 export async function updateProjectActionAction(
   projectId: string,
+  fixedPackageId: string | null,
   returnQuery: string,
   actionId: string,
   formData: FormData,
 ) {
-  const { context, action } = await withAuthorizedProjectMutation({
+  const user = await requireInternalUser();
+  const packageIds = parseProjectActionPackageIds(formData);
+  const destinationPackageId = packageIds[0] ?? null;
+  const action = await withAuthorizedActionMutation({
+    user,
     projectId,
-    minimumRole: "editor",
+    actionId,
+    fixedPackageId: fixedPackageId ?? undefined,
+    destinationPackageId,
     audit: {
       eventType: "action.updated",
       resourceType: "action",
       resourceId: actionId,
     },
-    operation: () => withGovernanceTierWorkflowLock(async () => {
-      const context = await getActionContext(projectId);
-      const existingAction = await getProjectAction(projectId, actionId);
-      if (!existingAction) notFound();
-      const validGovernanceTierIds = [...context.governanceTierIds];
-      if (
-        existingAction.governanceTierId &&
-        !validGovernanceTierIds.includes(existingAction.governanceTierId)
-      ) {
-        validGovernanceTierIds.push(existingAction.governanceTierId);
-      }
-      const parsed = parseProjectActionFormData(
-        formData,
-        context.packageIds,
-        validGovernanceTierIds,
-      );
-      assertGateId(parsed.input.gateId, context.gateIds);
-      const action = await updateProjectAction(
-        projectId,
-        actionId,
-        parsed.input,
-        parsed.actor,
-      );
-      return { context, action };
-    }),
+    operation: (_client, _actor, existingAction) =>
+      withGovernanceTierWorkflowLock(async () => {
+        const governanceTierIds = await getActionGovernanceTierIds(projectId);
+        if (
+          existingAction.governanceTierId
+          && !governanceTierIds.includes(existingAction.governanceTierId)
+        ) {
+          governanceTierIds.push(existingAction.governanceTierId);
+        }
+        setAuthenticatedActor(formData, user);
+        const parsed = parseProjectActionFormData(
+          formData,
+          destinationPackageId ? [destinationPackageId] : [],
+          governanceTierIds,
+        );
+        parsed.actor.userId = user.id;
+        const updated = await updateProjectAction(
+          projectId,
+          actionId,
+          parsed.input,
+          parsed.actor,
+        );
+        return updated;
+      }),
   });
 
-  revalidateActionRegister(projectId);
-  revalidateRelatedGate(context.project, context.packages, action);
-  redirect(actionRegisterPath(projectId, returnQuery));
+  revalidateActionRegister(projectId, action);
+  revalidateRelatedGate(projectId, action);
+  redirect(actionRegisterPath(projectId, fixedPackageId, returnQuery));
 }
 
 export async function addProjectActionUpdateAction(
   projectId: string,
+  fixedPackageId: string | null,
   returnQuery: string,
   actionId: string,
   formData: FormData,
 ) {
-  const { context, action } = await withAuthorizedProjectMutation({
+  const user = await requireInternalUser();
+  const action = await withAuthorizedActionMutation({
+    user,
     projectId,
-    minimumRole: "editor",
+    actionId,
+    fixedPackageId: fixedPackageId ?? undefined,
     audit: {
       eventType: "action.comment_added",
       resourceType: "action",
       resourceId: actionId,
     },
     operation: async () => {
-      const context = await getActionContext(projectId);
+      setAuthenticatedActor(formData, user);
       const parsed = parseActionUpdateFormData(formData);
-      const action = await addProjectActionUpdate(
+      parsed.actor.userId = user.id;
+      return addProjectActionUpdate(
         projectId,
         actionId,
         parsed.text,
         parsed.actor,
       );
-      return { context, action };
     },
   });
 
-  revalidateActionRegister(projectId);
-  revalidateRelatedGate(context.project, context.packages, action);
-  redirect(actionRegisterPath(projectId, returnQuery));
+  revalidateActionRegister(projectId, action);
+  revalidateRelatedGate(projectId, action);
+  redirect(actionRegisterPath(projectId, fixedPackageId, returnQuery));
 }
 
 export async function closeProjectActionAction(
   projectId: string,
+  fixedPackageId: string | null,
   returnQuery: string,
   actionId: string,
   formData: FormData,
 ) {
-  const { context, action } = await withAuthorizedProjectMutation({
+  const user = await requireInternalUser();
+  const action = await withAuthorizedActionMutation({
+    user,
     projectId,
-    minimumRole: "editor",
+    actionId,
+    fixedPackageId: fixedPackageId ?? undefined,
     audit: {
       eventType: "action.closed",
       resourceType: "action",
       resourceId: actionId,
     },
-    operation: async (authenticatedActor) => {
-      const context = await getActionContext(projectId);
+    operation: async () => {
+      setAuthenticatedActor(formData, user);
       const parsed = parseActionTransitionFormData(formData);
-      const action = await closeProjectAction(
+      parsed.actor.userId = user.id;
+      return closeProjectAction(
         projectId,
         actionId,
         parsed.actor,
         parsed.comment,
-        authenticatedActor,
+        user,
       );
-      return { context, action };
     },
   });
 
-  revalidateActionRegister(projectId);
-  revalidateRelatedGate(context.project, context.packages, action);
-  redirect(actionRegisterPath(projectId, returnQuery));
+  revalidateActionRegister(projectId, action);
+  revalidateRelatedGate(projectId, action);
+  redirect(actionRegisterPath(projectId, fixedPackageId, returnQuery));
 }
 
 export async function reopenProjectActionAction(
   projectId: string,
+  fixedPackageId: string | null,
   returnQuery: string,
   actionId: string,
   formData: FormData,
 ) {
-  const { context, action } = await withAuthorizedProjectMutation({
+  const user = await requireInternalUser();
+  const action = await withAuthorizedActionMutation({
+    user,
     projectId,
-    minimumRole: "editor",
+    actionId,
+    fixedPackageId: fixedPackageId ?? undefined,
     audit: {
       eventType: "action.reopened",
       resourceType: "action",
       resourceId: actionId,
     },
-    operation: async (authenticatedActor) => {
-      const context = await getActionContext(projectId);
+    operation: async () => {
+      setAuthenticatedActor(formData, user);
       const parsed = parseActionTransitionFormData(formData);
-      const action = await reopenProjectAction(
+      parsed.actor.userId = user.id;
+      return reopenProjectAction(
         projectId,
         actionId,
         parseReopenStatus(formData),
         parsed.actor,
         parsed.comment,
-        authenticatedActor,
+        user,
       );
-      return { context, action };
     },
   });
 
-  revalidateActionRegister(projectId);
-  revalidateRelatedGate(context.project, context.packages, action);
-  redirect(actionRegisterPath(projectId, returnQuery));
+  revalidateActionRegister(projectId, action);
+  revalidateRelatedGate(projectId, action);
+  redirect(actionRegisterPath(projectId, fixedPackageId, returnQuery));
 }
 
 export async function deleteProjectActionAction(
   projectId: string,
+  fixedPackageId: string | null,
   returnQuery: string,
   actionId: string,
 ) {
-  const { context, action, result } = await withAuthorizedProjectMutation({
+  const user = await requireInternalUser();
+  const { action, result } = await withAuthorizedActionMutation<{
+    action: ProjectAction;
+    result: ProjectActionDeletionResult;
+  }>({
+    user,
     projectId,
-    minimumRole: "editor",
+    actionId,
+    fixedPackageId: fixedPackageId ?? undefined,
     audit: {
       eventType: "action.deleted",
       resourceType: "action",
       resourceId: actionId,
     },
     isSuccess: (candidate) => candidate.result.deleted,
-    operation: () => withGateWorkflowLock(async () => {
-    const context = await getActionContext(projectId);
-    const action = await getProjectAction(projectId, actionId);
-    if (!action) notFound();
-
-    const awaitingCycle = [
-      ...context.project.gates,
-      ...context.packages.flatMap((projectPackage) => projectPackage.gates),
-    ]
-      .flatMap((gate) => gate.reviewCycles)
-      .find(
-        (cycle) =>
-          cycle.status === "awaiting_approval" &&
-          cycle.frozenEvidence.acceptedActions.some(
-            (acceptedAction) => acceptedAction.actionId === actionId,
-          ),
-      );
-    const result = awaitingCycle
-      ? {
-          deleted: false as const,
-          reason: `This Gate Action is accepted in active Review Cycle ${awaitingCycle.cycleNumber} and must remain available until the review is complete.`,
-        }
-      : await deleteProjectAction(projectId, actionId);
-
-      return { context, action, result };
-    }),
+    operation: (_client, _actor, existingAction) =>
+      withGateWorkflowLock(async () => ({
+        action: existingAction,
+        result: await deleteProjectAction(projectId, actionId),
+      })),
   });
 
   if (!result.deleted) {
     redirect(
-      actionRegisterPath(projectId, returnQuery, {
+      actionRegisterPath(projectId, fixedPackageId, returnQuery, {
         actionError: result.reason,
-        actionId: actionId,
+        actionId,
       }),
     );
   }
 
-  revalidateActionRegister(projectId);
-  revalidateRelatedGate(context.project, context.packages, action);
-  redirect(actionRegisterPath(projectId, returnQuery));
+  revalidateActionRegister(projectId, action);
+  revalidateRelatedGate(projectId, action);
+  redirect(actionRegisterPath(projectId, fixedPackageId, returnQuery));
 }
 
-async function getActionContext(projectId: string) {
-  const project = await getProject(projectId);
-  if (!project) notFound();
-
-  const packages = await getPackages(project.id);
-  return {
-    project,
-    packages,
-    packageIds: packages.map((projectPackage) => projectPackage.id),
-    governanceTierIds: project.governanceTiers.map((tier) => tier.id),
-    gateIds: [
-      ...project.gates.map((gate) => gate.id),
-      ...packages.flatMap((projectPackage) =>
-        projectPackage.gates.map((gate) => gate.id),
-      ),
-    ],
-  };
+function setAuthenticatedActor(formData: FormData, user: {
+  id: string;
+  displayName: string;
+}) {
+  formData.set("actorName", user.displayName);
 }
 
-function assertGateId(gateId: string | null, validGateIds: string[]) {
-  if (gateId && !validGateIds.includes(gateId)) {
-    throw new Error("The selected Gate is invalid.");
-  }
-}
-
-function revalidateActionRegister(projectId: string) {
+function revalidateActionRegister(projectId: string, action: ProjectAction) {
   revalidatePath(`/projects/${projectId}`);
   revalidatePath(`/projects/${projectId}/actions`);
+  for (const packageId of action.packageIds) {
+    revalidatePath(`/projects/${projectId}/packages/${packageId}/actions`);
+  }
 }
 
-function revalidateRelatedGate(
-  project: Project,
-  packages: ProjectPackage[],
-  action: ProjectAction,
-) {
+function revalidateRelatedGate(projectId: string, action: ProjectAction) {
   if (!action.gateId) return;
-
-  if (project.gates.some((gate) => gate.id === action.gateId)) {
-    revalidatePath(
-      `/projects/${project.id}/gates/${encodeURIComponent(action.gateId)}`,
-    );
-    return;
-  }
-
-  const projectPackage = packages.find((candidate) =>
-    candidate.gates.some((gate) => gate.id === action.gateId),
-  );
-  if (projectPackage) {
-    revalidatePath(
-      `/projects/${project.id}/packages/${projectPackage.id}/gates/${encodeURIComponent(action.gateId)}`,
-    );
-  }
+  const packageId = action.packageIds[0];
+  revalidatePath(packageId
+    ? `/projects/${projectId}/packages/${packageId}/gates/${encodeURIComponent(action.gateId)}`
+    : `/projects/${projectId}/gates/${encodeURIComponent(action.gateId)}`);
 }
 
 function actionRegisterPath(
   projectId: string,
+  fixedPackageId: string | null,
   returnQuery: string,
   extra?: Record<string, string>,
 ) {
@@ -318,5 +303,8 @@ function actionRegisterPath(
   params.delete("actionId");
   for (const [key, value] of Object.entries(extra ?? {})) params.set(key, value);
   const query = params.toString();
-  return `/projects/${projectId}/actions${query ? `?${query}` : ""}`;
+  const base = fixedPackageId
+    ? `/projects/${projectId}/packages/${fixedPackageId}/actions`
+    : `/projects/${projectId}/actions`;
+  return `${base}${query ? `?${query}` : ""}`;
 }

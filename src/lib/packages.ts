@@ -103,11 +103,6 @@ export function getNextPackageStage(currentStage: PackageStageId): PackageStageI
   return packageStageIds[currentIndex + 1] ?? null;
 }
 
-export function getPreviousPackageStage(currentStage: PackageStageId): PackageStageId | null {
-  const currentIndex = packageStageIds.indexOf(currentStage);
-  return packageStageIds[currentIndex - 1] ?? null;
-}
-
 async function ensureDataFile() {
   await mkdir(dataDirectory, { recursive: true });
 
@@ -399,6 +394,7 @@ export async function respondToPackageGateReview(
       transition.completion === "approved" ||
       transition.completion === "approved_with_actions"
     ) {
+      gate.reapprovalRequired = false;
       const nextStage = getNextPackageStage(projectPackage.currentStage);
       if (nextStage) {
         projectPackage.currentStage = nextStage;
@@ -525,11 +521,23 @@ export async function completePackageGateReviewInvitation(
   });
 }
 
-export async function reopenPackageGate(projectId: string, packageId: string, gateId: string) {
+export async function reopenPackageGate(
+  projectId: string,
+  packageId: string,
+  gateId: string,
+  reopeningReason: string,
+) {
   if (getOperationalDataBackend() === "postgres") {
-    return postgresOperational.reopenPackageGate(projectId, packageId, gateId);
+    return postgresOperational.reopenPackageGate(
+      projectId,
+      packageId,
+      gateId,
+      reopeningReason,
+    );
   }
   return withGateWorkflowLock(async () => {
+    const reason = reopeningReason.trim();
+    if (!reason) throw new Error("A reopening reason is required.");
     const packages = await readPackagesFile();
     const projectPackage = packages.find(
       (candidate) => candidate.projectId === projectId && candidate.id === packageId,
@@ -540,54 +548,58 @@ export async function reopenPackageGate(projectId: string, packageId: string, ga
       return null;
     }
 
-    if (gate.status === "approved" || gate.status === "approved_with_actions") {
-      gate.status = "not_submitted";
-      projectPackage.updatedAt = new Date().toISOString();
-      await writePackagesFile(packages);
+    if (projectPackage.gates.some((candidate) => candidate.reapprovalRequired)) {
+      throw new Error(
+        "The currently reopened Gate must be formally approved before another Gate can be reopened.",
+      );
     }
-
-    return projectPackage;
-  });
-}
-
-export async function returnPackageToPreviousStage(projectId: string, packageId: string) {
-  if (getOperationalDataBackend() === "postgres") {
-    return postgresOperational.returnPackageToPreviousStage(projectId, packageId);
-  }
-  return withGateWorkflowLock(async () => {
-    const packages = await readPackagesFile();
-    const index = packages.findIndex(
-      (projectPackage) => projectPackage.projectId === projectId && projectPackage.id === packageId,
+    const currentStageIndex = projectPackage.gates.findIndex(
+      (candidate) => candidate.stageId === projectPackage.currentStage,
     );
-
-    if (index === -1) {
-      return null;
+    const eligibleGate = projectPackage.gates[currentStageIndex - 1];
+    if (!eligibleGate || eligibleGate.id !== gateId) {
+      throw new Error(
+        "Only the immediately preceding approved Gate that advanced this lifecycle may be reopened.",
+      );
     }
-
+    if (gate.status !== "approved" && gate.status !== "approved_with_actions") {
+      throw new Error("Only the immediately preceding approved Gate may be reopened.");
+    }
+    const currentGate = projectPackage.gates[currentStageIndex];
     if (
-      packages[index].gates.some(
-        (gate) => gate.status === "submitted_for_approval",
+      currentGate
+      && (
+        currentGate.status === "submitted_for_approval"
+        || currentGate.status === "approved"
+        || currentGate.status === "approved_with_actions"
       )
     ) {
-      return packages[index];
+      throw new Error(
+        "The current Stage already has an active or approved Gate Review and cannot move backward.",
+      );
     }
-
-    const previousStage = getPreviousPackageStage(packages[index].currentStage);
-
-    if (!previousStage) {
-      return packages[index];
+    const approvedCycle = [...gate.reviewCycles].reverse().find(
+      (cycle) => cycle.status === "approved" || cycle.status === "approved_with_actions",
+    );
+    if (!approvedCycle) {
+      throw new Error("The selected Gate has no approved Review Cycle that advanced this lifecycle.");
     }
-
-    const updatedPackage: ProjectPackage = {
-      ...packages[index],
-      currentStage: previousStage,
-      updatedAt: new Date().toISOString(),
-    };
-
-    packages[index] = updatedPackage;
+    const previousStage = projectPackage.currentStage;
+    const reopenedAt = new Date().toISOString();
+    gate.status = "not_submitted";
+    gate.reapprovalRequired = true;
+    projectPackage.currentStage = gate.stageId;
+    projectPackage.updatedAt = reopenedAt;
     await writePackagesFile(packages);
-
-    return updatedPackage;
+    return {
+      entity: projectPackage,
+      gateId,
+      reviewCycleId: approvedCycle.id,
+      previousStage,
+      targetStage: gate.stageId,
+      reason,
+      reopenedAt,
+    };
   });
 }
 

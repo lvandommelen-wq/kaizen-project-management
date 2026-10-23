@@ -4,8 +4,12 @@ import { revalidatePath } from "next/cache";
 import { notFound, redirect } from "next/navigation";
 import {
   requireProjectRole,
+  requireInternalUser,
   withAuthorizedProjectMutation,
 } from "@/lib/authorization";
+import {
+  withAuthorizedAccessMutation,
+} from "@/lib/access-authorization";
 import { deleteDeliverablesForPackage } from "@/lib/deliverables";
 import { getOperationalDataBackend } from "@/lib/operational/backend";
 import {
@@ -18,7 +22,6 @@ import {
   deletePackage,
   getPackage,
   parsePackageFormData,
-  returnPackageToPreviousStage,
   updatePackage,
 } from "@/lib/packages";
 
@@ -49,55 +52,29 @@ export async function createPackageAction(projectId: string, formData: FormData)
 }
 
 export async function updatePackageAction(projectId: string, packageId: string, formData: FormData) {
-  await requireProjectRole(projectId, "editor");
-  const existingPackage = await getPackage(projectId, packageId);
-
-  if (!existingPackage) {
-    notFound();
-  }
-
+  const user = await requireInternalUser();
   const input = parsePackageFormData(formData);
-  const projectPackage = await withAuthorizedProjectMutation({
+  const projectPackage = await withAuthorizedAccessMutation({
+    user,
     projectId,
-    minimumRole: "editor",
+    packageId,
+    module: "overview",
     audit: {
       eventType: "package.updated",
       resourceType: "package",
       resourceId: packageId,
       changeSummary: { fields: ["package_details"] },
     },
-    operation: () => updatePackage(
-      projectId,
-      packageId,
-      {
+    operation: async () => {
+      const existingPackage = await getPackage(projectId, packageId);
+      if (!existingPackage) notFound();
+      return updatePackage(projectId, packageId, {
         ...input,
         currentStage: existingPackage.currentStage,
         status: existingPackage.status,
         targetDeliveryDate: existingPackage.targetDeliveryDate,
-      },
-    ),
-  });
-
-  if (!projectPackage) {
-    notFound();
-  }
-
-  revalidatePath("/projects");
-  revalidatePath(`/projects/${projectId}`);
-  revalidatePath(`/projects/${projectId}/packages/${packageId}`);
-  redirect(`/projects/${projectId}/packages/${packageId}`);
-}
-
-export async function returnPackageToPreviousStageAction(projectId: string, packageId: string) {
-  const projectPackage = await withAuthorizedProjectMutation({
-    projectId,
-    minimumRole: "editor",
-    audit: {
-      eventType: "package.stage_returned",
-      resourceType: "package",
-      resourceId: packageId,
+      });
     },
-    operation: () => returnPackageToPreviousStage(projectId, packageId),
   });
 
   if (!projectPackage) {

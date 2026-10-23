@@ -73,7 +73,11 @@ export async function getCurrentUser(requestHeaders: Headers): Promise<CurrentUs
     normalizedEmail: row.normalized_email,
     organizationId: row.organization_id,
     status: isUserStatus(row.status) ? row.status : "disabled",
-    accessClass: row.access_class === "internal" ? "internal" : "external_reviewer",
+    accessClass: row.access_class === "internal"
+      ? "internal"
+      : row.access_class === "external_collaborator"
+        ? "external_collaborator"
+        : "external_reviewer",
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     lastAuthenticatedAt: row.last_authenticated_at,

@@ -23,13 +23,14 @@ export default async function ProjectHistoryPage({
     <div className="space-y-8">
       <div className="page-header">
         <div><p className="eyebrow">{project.projectNumber}</p><h1>Project history</h1><p className="page-description">Immutable governance and operational changes.</p></div>
-        <Link href={`/projects/${projectId}`} className="button-secondary">Project</Link>
+        <Link href="/projects" className="button-secondary">All projects</Link>
+        <Link href={`/projects/${projectId}`} className="button-secondary">Current project</Link>
       </div>
       <section className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
         {events.length ? (
           <table className="w-full divide-y divide-slate-200 text-sm">
             <thead className="bg-slate-50 text-left text-xs font-semibold uppercase tracking-wide text-slate-500"><tr><th className="px-4 py-3">Timestamp</th><th className="px-4 py-3">Actor</th><th className="px-4 py-3">Event</th><th className="px-4 py-3">Related record</th><th className="px-4 py-3">Summary</th></tr></thead>
-            <tbody className="divide-y divide-slate-100">{events.map((event) => <tr key={event.id}><td className="px-4 py-3 whitespace-nowrap">{formatTimestamp(event.occurredAt)}</td><td className="px-4 py-3">{event.actorDisplayName ?? "System"}</td><td className="px-4 py-3 font-medium">{event.eventType}</td><td className="px-4 py-3"><span className="capitalize">{event.resourceType.replaceAll("_", " ")}</span><br/><span className="font-mono text-xs text-slate-500">{event.resourceId}</span></td><td className="px-4 py-3 text-slate-600">{formatSummary({ ...event.metadata, ...event.changeSummary })}</td></tr>)}</tbody>
+            <tbody className="divide-y divide-slate-100">{events.map((event) => <tr key={event.id}><td className="px-4 py-3 whitespace-nowrap">{formatTimestamp(event.occurredAt)}</td><td className="px-4 py-3">{event.actorDisplayName ?? "System"}</td><td className="px-4 py-3 font-medium">{event.eventType}</td><td className="px-4 py-3"><span className="capitalize">{event.resourceType.replaceAll("_", " ")}</span>{event.resourceType === "access_grant" ? null : <><br/><span className="font-mono text-xs text-slate-500">{event.resourceId}</span></>}</td><td className="px-4 py-3 text-slate-600">{formatSummary(event.resourceType === "access_grant" ? event.changeSummary : { ...event.metadata, ...event.changeSummary })}</td></tr>)}</tbody>
           </table>
         ) : <p className="p-8 text-sm text-slate-600">No audit events have been recorded for this Project.</p>}
       </section>

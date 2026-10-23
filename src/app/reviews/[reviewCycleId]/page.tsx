@@ -1,13 +1,12 @@
 import { headers } from "next/headers";
 import { notFound, redirect } from "next/navigation";
+import { FrozenGateReviewEvidence } from "@/app/_components/frozen-gate-review-evidence";
 import { SignOutButton } from "@/app/_components/sign-out-button";
 import { respondToAssignedGateReviewAction } from "@/app/reviews/actions";
 import { getCurrentUser } from "@/lib/current-user";
 import {
   gateReviewCycleStatusLabels,
-  getGateCriterionStatusLabel,
   getGateReviewApprovalState,
-  type GateReviewCycle,
 } from "@/lib/gates";
 import { getOperationalDataBackend } from "@/lib/operational/backend";
 import { getAssignedGateReview } from "@/lib/operational/postgres";
@@ -61,10 +60,10 @@ export default async function AssignedReviewPage({
       <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
         <h2 className="text-lg font-semibold">Frozen review evidence</h2>
         <p className="mt-1 text-sm text-slate-600">Submitted {formatTimestamp(cycle.submittedAt)}. The information below is the immutable evidence for this Review Cycle.</p>
+        <div className="mt-6">
+          <FrozenGateReviewEvidence cycle={cycle} />
+        </div>
         <div className="mt-6 grid gap-6 lg:grid-cols-2">
-          {cycle.frozenEvidence.criteria.length > 0 ? <EvidenceList heading="Legacy Gate Criteria" empty="No legacy criteria were frozen." items={cycle.frozenEvidence.criteria.map((item) => ({ id: item.criterionId, title: item.description, detail: getGateCriterionStatusLabel(item.status) }))} /> : null}
-          {cycle.frozenEvidence.matrixReviewConfirmation && cycle.frozenEvidence.applicabilityMatrix ? <EvidenceList heading="Confirmed Applicability Matrix review" empty="No Deliverables were frozen for the confirmed matrix scope." items={matrixReviewEvidenceItems(cycle)} /> : null}
-          <EvidenceList heading="Deliverables" empty="No deliverables were frozen." items={cycle.frozenEvidence.deliverables.map((item) => ({ id: item.deliverableId, title: item.title, detail: `${item.status.replaceAll("_", " ")} — Acceptance requirements: ${item.description || "Not recorded in this historical Review Cycle."}` }))} />
           <EvidenceList heading="Accepted actions" empty="No open Gate Actions were accepted." items={cycle.frozenEvidence.acceptedActions.map((item) => ({ id: item.actionId, title: `Action ${item.sequence}: ${item.description}`, detail: `${item.assignee} / ${item.status.replaceAll("_", " ")}` }))} />
           <EvidenceList heading="Approval history" empty="No responses have been recorded." items={cycle.approvers.filter((item) => item.response).map((item) => ({ id: item.gateApproverId, title: `${item.approvalRole}: ${item.response?.outcome.replaceAll("_", " ")}`, detail: `${item.name} / ${formatTimestamp(item.response!.respondedAt)}` }))} />
         </div>
@@ -87,7 +86,6 @@ export default async function AssignedReviewPage({
 
 function Summary({ label, value }: { label: string; value: string }) { return <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm"><p className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</p><p className="mt-2 font-semibold">{value}</p></div>; }
 function EvidenceList({ heading, empty, items }: { heading: string; empty: string; items: { id: string; title: string; detail: string }[] }) { return <div><h3 className="font-semibold">{heading}</h3>{items.length ? <ul className="mt-3 space-y-2">{items.map((item) => <li key={item.id} className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm"><p className="font-medium">{item.title}</p><p className="mt-1 capitalize text-slate-600">{item.detail}</p></li>)}</ul> : <p className="mt-2 text-sm text-slate-500">{empty}</p>}</div>; }
-function matrixReviewEvidenceItems(cycle: GateReviewCycle) { const confirmation = cycle.frozenEvidence.matrixReviewConfirmation!; const matrix = cycle.frozenEvidence.applicabilityMatrix!; const gates = confirmation.reviewScope === "final_lifecycle" ? matrix.gates : matrix.gates.filter((gate) => gate.stageId === confirmation.targetStageId); return [{ id: `confirmation:${cycle.id}`, title: `${confirmation.targetStageLabel} — confirmed by ${confirmation.reviewer.displayName}`, detail: `${formatTimestamp(confirmation.confirmedAt)} — fingerprint ${confirmation.matrixFingerprint}` }, ...gates.flatMap((gate) => gate.items.map((item) => ({ id: `${gate.gateId}:${item.itemId}`, title: `${gate.stageLabel}: ${item.title}`, detail: `${item.applicability.replaceAll("_", " ")}${item.justification ? ` — justification: ${item.justification}` : ""} — acceptance requirements: ${item.description}` })))]; }
 function formatTimestamp(value: string) { return new Intl.DateTimeFormat("en-GB", { dateStyle: "medium", timeStyle: "short", timeZone: "UTC" }).format(new Date(value)); }
 function firstValue(value: string | string[] | undefined) { return Array.isArray(value) ? value[0] : value; }
 function reviewError(error: string) { if (error === "comment_required") return "A rework reason is required."; if (error === "not_eligible") return "An earlier Approval Level must complete first."; if (error === "already_responded") return "This assignment has already responded."; return "This Review Cycle is no longer accepting your response."; }

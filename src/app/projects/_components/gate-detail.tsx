@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { FrozenGateReviewEvidence } from "@/app/_components/frozen-gate-review-evidence";
 import { ApproverForm } from "./approver-form";
 import { ConfirmationAction } from "./confirmation-action";
 import { GateApprovalTestPanel } from "./gate-approval-test-panel";
@@ -14,7 +15,6 @@ import {
   canWithdrawGateReviewCycle,
   canRetryGateReviewInvitation,
   getAwaitingGateReviewCycle,
-  getGateCriterionStatusLabel,
   getGateReviewApprovalState,
   isGateInPreparation,
   type Gate,
@@ -65,9 +65,16 @@ type GateDetailProps = {
   gateActions: ProjectAction[];
   gateActionPackageId: string | null;
   invitationFailureCount?: number;
-  canEdit: boolean;
+  canManageGateReviews: boolean;
+  canReadGateReviews: boolean;
+  canReadDeliverables: boolean;
+  canEditDeliverables: boolean;
+  canReadActions: boolean;
+  canWriteActions: boolean;
   canManageActiveIdentityLinks: boolean;
   canWithdrawSubmission: boolean;
+  canRetryInvitations: boolean;
+  canReopenGate: boolean;
   isCurrentGate: boolean;
   matrixReview: GateMatrixReviewState | null;
   packages: { id: string; label: string }[];
@@ -105,9 +112,16 @@ export function GateDetail({
   gateActions,
   gateActionPackageId,
   invitationFailureCount,
-  canEdit,
+  canManageGateReviews,
+  canReadGateReviews,
+  canReadDeliverables,
+  canEditDeliverables,
+  canReadActions,
+  canWriteActions,
   canManageActiveIdentityLinks,
   canWithdrawSubmission,
+  canRetryInvitations,
+  canReopenGate,
   isCurrentGate,
   matrixReview,
   packages,
@@ -134,10 +148,11 @@ export function GateDetail({
   const awaitingApprovalState = awaitingReviewCycle
     ? getGateReviewApprovalState(awaitingReviewCycle)
     : null;
-  const canPrepare = canEdit && isGateInPreparation(gate);
-  const canConfigureApprovers = canPrepare;
-  const canAddGateAction = isCurrentGate && canPrepare;
-  const canSubmit = isCurrentGate && canPrepare && submissionIssues.length === 0;
+  const gateIsInPreparation = isGateInPreparation(gate);
+  const canPrepareGateReview = canManageGateReviews && gateIsInPreparation;
+  const canConfigureApprovers = canPrepareGateReview;
+  const canAddGateAction = isCurrentGate && canPrepareGateReview && canWriteActions;
+  const canSubmit = isCurrentGate && canPrepareGateReview && submissionIssues.length === 0;
   const approversByLevel = groupApproversByLevel(gate.approvers);
   const approvalStatus = getApprovalStatus(gate);
   const gateActionFollowUp = openGateActions.length > 0
@@ -172,22 +187,33 @@ export function GateDetail({
       <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <SummaryCard label="Scope level" value={scopeLabel} />
         <SummaryCard label="Stage" value={stageLabel} />
-        <SummaryCard label="Gate status" value={gateStatusLabels[gate.status]} valueClassName={gateStatusClass(gate.status)} />
-        <SummaryCard
-          label="Approval status"
-          value={approvalStatus.value}
-          detail={approvalStatus.detail}
-          valueClassName={approvalStatus.valueClassName}
-        />
+        {canReadGateReviews ? (
+          <>
+            <SummaryCard label="Gate status" value={gateStatusLabels[gate.status]} valueClassName={gateStatusClass(gate.status)} />
+            <SummaryCard
+              label="Approval status"
+              value={approvalStatus.value}
+              detail={approvalStatus.detail}
+              valueClassName={approvalStatus.valueClassName}
+            />
+          </>
+        ) : null}
       </section>
 
-      {invitationFailureCount ? (
+      {gate.reapprovalRequired ? (
+        <p className="rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm font-medium text-amber-950">
+          This Gate was reopened and requires a new formal approval. Historical Review Cycles remain unchanged;
+          resubmission will create a new frozen Review Cycle before the lifecycle can progress.
+        </p>
+      ) : null}
+
+      {canReadGateReviews && invitationFailureCount ? (
         <p className="rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950">
           The Gate workflow update was saved, but {invitationFailureCount} approval invitation{invitationFailureCount === 1 ? "" : "s"} could not be confirmed. Review the delivery details in Review History.
         </p>
       ) : null}
 
-      <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+      {canReadGateReviews ? <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
         <div>
           <h2 className="text-lg font-semibold text-slate-950">Approvers</h2>
           <p className="mt-1 text-sm text-slate-600">
@@ -270,9 +296,9 @@ export function GateDetail({
             <ApproverForm action={createApproverAction} submitLabel="Add Approver" />
           </details>
         ) : null}
-      </section>
+      </section> : null}
 
-      <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+      {canReadGateReviews ? <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
         <div>
           <h2 className="text-lg font-semibold text-slate-950">Gate Submission</h2>
           <p className="mt-1 text-sm text-slate-600">
@@ -309,7 +335,7 @@ export function GateDetail({
               />
             ) : (
               <p className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
-                Only a Project Owner may withdraw an active Review Cycle. Withdrawal is unavailable after final Gate approval and Stage progression.
+                Only an authorized Project Owner or Package Lead may withdraw an active Review Cycle. Withdrawal is unavailable after final Gate approval and Stage progression.
               </p>
             )}
             {approvalError ? (
@@ -336,18 +362,24 @@ export function GateDetail({
         ) : gate.status === "approved" || gate.status === "approved_with_actions" ? (
           <div className="mt-5 space-y-4">
             <p className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
-              This Gate has a formal decision. Reopen it before making another decision. Reopening preserves
-              Deliverables, Actions, and the current lifecycle Stage.
+              This Gate has a formal decision. Only the immediately preceding approved Gate may be reopened.
+              Reopening preserves historical Review Cycles and execution progress, and moves the {scopeLabel}
+              exactly one active Stage backward for controlled baseline revision.
             </p>
-            {canEdit ? <ConfirmationAction
+            {canReopenGate ? <ConfirmationAction
               action={reopenAction}
               buttonLabel="Reopen Gate"
               confirmLabel="Reopen Gate"
-              message="This resets the Gate decision to Not Submitted. It does not change the current Stage or remove existing Gate information."
+              message={`Reopen this Gate and return the ${scopeLabel} exactly one active Stage backward? The approved Review Cycle and all historical evidence will remain unchanged. Renewed formal approval will be required before progression.`}
               title="Reopen Gate"
+              textArea={{
+                label: "Reopening reason (required)",
+                name: "reopeningReason",
+                required: true,
+              }}
             /> : null}
           </div>
-        ) : isCurrentGate && canPrepare ? (
+        ) : isCurrentGate && canPrepareGateReview ? (
           <div className="mt-5 space-y-5">
             {gate.status === "returned_for_rework" ? (
               <p className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-900">
@@ -359,6 +391,7 @@ export function GateDetail({
               <MatrixReviewCard
                 action={confirmMatrixReviewAction}
                 applicabilityHref={applicabilityHref}
+                canOpenApplicability={canReadDeliverables}
                 state={matrixReview}
               />
             ) : null}
@@ -373,7 +406,7 @@ export function GateDetail({
                 <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-amber-900">
                   {submissionIssues.map((issue) => <li key={issue.code}>{issue.message}</li>)}
                 </ul>
-                {submissionIssues.some((issue) =>
+                {canReadDeliverables && submissionIssues.some((issue) =>
                   issue.code === "missing_applicability_justification") ? (
                   <Link
                     href={applicabilityHref}
@@ -407,18 +440,19 @@ export function GateDetail({
             This Gate can be prepared, but it can only be submitted when its related Stage is current.
           </p>
         )}
-      </section>
+      </section> : null}
 
-      <ReviewHistory
-        actionRegisterHref={actionRegisterHref}
+      {canReadGateReviews ? <ReviewHistory
+        actionRegisterHref={canReadActions ? actionRegisterHref : null}
         activeIdentityLinkCandidates={activeIdentityLinkCandidates}
         canManageActiveIdentityLinks={canManageActiveIdentityLinks}
+        canRetryInvitations={canRetryInvitations}
         cycles={gate.reviewCycles}
         gateActions={gateActions}
         linkActiveIdentityAction={linkActiveIdentityAction}
         retryInvitationAction={retryInvitationAction}
         selectedReviewCycleId={selectedReviewCycleId}
-      />
+      /> : null}
 
       <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
         <div className="flex flex-wrap items-start justify-between gap-3">
@@ -429,14 +463,24 @@ export function GateDetail({
             </p>
           </div>
           <div className="flex flex-wrap items-center justify-end gap-3">
-            <span className={`status-pill ${openGateActions.length > 0 ? "status-amber" : "status-not_assessed"}`}>
-              {gateActionFollowUp}
-            </span>
-            <Link href={actionRegisterHref} className="button-secondary">Master Action Register</Link>
+            {canReadActions ? (
+              <>
+                <span className={`status-pill ${openGateActions.length > 0 ? "status-amber" : "status-not_assessed"}`}>
+                  {gateActionFollowUp}
+                </span>
+                <Link href={actionRegisterHref} className="button-secondary">Master Action Register</Link>
+              </>
+            ) : (
+              <span className="status-pill bg-slate-100 text-slate-700">Actions access restricted</span>
+            )}
           </div>
         </div>
 
-        {gateActions.length === 0 ? (
+        {!canReadActions ? (
+          <p className="mt-5 rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">
+            Actions Read permission is required to view live Gate Actions.
+          </p>
+        ) : gateActions.length === 0 ? (
           <p className="mt-5 rounded-lg border border-dashed border-slate-300 bg-slate-50 p-4 text-sm text-slate-600">
             No Actions have been created from this Gate.
           </p>
@@ -483,7 +527,7 @@ export function GateDetail({
               Deliverables are governance records, not files. Documents can be linked in a later iteration.
             </p>
           </div>
-          {deliverables.length > 0 ? (
+          {canReadDeliverables && deliverables.length > 0 ? (
             <p className="rounded-full bg-slate-100 px-3 py-1.5 text-sm font-medium text-slate-700">
               {completedDeliverableCount} / {applicableDeliverableCount} completed
               <span aria-hidden="true"> &middot; </span>
@@ -498,7 +542,25 @@ export function GateDetail({
           ) : null}
         </div>
 
-        {deliverables.length === 0 ? (
+        {canReadDeliverables && gate.deliverableCompletionLocked ? (
+          <p className="mt-5 rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-900">
+            This Stage&apos;s Deliverable configuration and completion evidence are protected by its submitted or
+            approved Gate. {gate.status === "submitted_for_approval"
+              ? "Withdraw or return the Review Cycle before revising this Stage."
+              : "Formally reopen this Gate before revising it."}
+          </p>
+        ) : canReadDeliverables && gate.deliverableConfigurationLocked ? (
+          <p className="mt-5 rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-900">
+            The preceding approved or submitted Gate protects this active Stage&apos;s Deliverable configuration.
+            Titles, applicability, justifications, additions and removals are locked; execution completion remains editable.
+          </p>
+        ) : null}
+
+        {!canReadDeliverables ? (
+          <p className="mt-5 rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">
+            Deliverables Read permission is required to view Package Deliverables.
+          </p>
+        ) : deliverables.length === 0 ? (
           <p className="mt-5 rounded-lg border border-dashed border-slate-300 bg-slate-50 p-4 text-sm text-slate-600">
             No Stage Deliverables are associated with this Gate.
           </p>
@@ -510,18 +572,18 @@ export function GateDetail({
               return (
                 <details
                   key={deliverable.id}
-                  className={`overflow-hidden rounded-lg border ${deliverableContainerClass(deliverable.status)}`}
+                  className={`overflow-hidden rounded-lg border ${deliverableContainerClass(deliverable)}`}
                 >
                   <summary className="cursor-pointer px-4 py-3 focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-slate-900">
                     <div className="ml-1 flex flex-wrap items-center justify-between gap-3">
                        <h3 className={`min-w-0 flex-1 text-sm font-semibold ${deliverable.applicability !== "applicable" ? "text-slate-600" : "text-slate-950"}`}>
-                         {isApplicabilityEntry ? (
+                          {isApplicabilityEntry && canReadDeliverables ? (
                            <Link href={applicabilityHref} className="text-blue-700 underline-offset-2 hover:underline">
                              {deliverable.title}
                            </Link>
                          ) : deliverable.title}
                        </h3>
-                      <span className={`status-pill shrink-0 ${deliverableStatusClass(deliverable.status)}`}>
+                      <span className={`status-pill shrink-0 ${deliverableStatusClass(deliverable)}`}>
                          {deliverable.applicability === "applicable" ? deliverableStatusLabels[deliverable.status] : applicabilityLabels[deliverable.applicability]}
                       </span>
                     </div>
@@ -535,9 +597,13 @@ export function GateDetail({
                       <Detail label="Related stage" value={stageLabel} />
                       <Detail label="Scope level" value={scopeLabel} />
                     </dl>
-                    {canPrepare && deliverable.applicability === "applicable" ? (
+                    {canEditDeliverables
+                    && gateIsInPreparation
+                    && !gate.deliverableCompletionLocked
+                    && deliverable.applicability === "applicable" ? (
                       <DeliverableForm
                         action={updateDeliverableAction.bind(null, deliverable.id)}
+                        configurationLocked={gate.deliverableConfigurationLocked}
                         deliverable={deliverable}
                         stageLabel={stageLabel}
                         submitLabel="Save Deliverable"
@@ -558,10 +624,12 @@ export function GateDetail({
 function MatrixReviewCard({
   action,
   applicabilityHref,
+  canOpenApplicability,
   state,
 }: {
   action: FormAction;
   applicabilityHref: string;
+  canOpenApplicability: boolean;
   state: GateMatrixReviewState;
 }) {
   const isFinal = state.target.reviewScope === "final_lifecycle";
@@ -603,9 +671,11 @@ function MatrixReviewCard({
         Opening the matrix does not confirm the review. Confirmation records the current Deliverable configuration and applicability decisions.
       </p>
       <div className="mt-4 flex flex-wrap gap-3">
-        <Link href={focusedHref} className="button-secondary">
-          {isFinal ? "Review Final Applicability Matrix" : "Review Next Stage Deliverables"}
-        </Link>
+        {canOpenApplicability ? (
+          <Link href={focusedHref} className="button-secondary">
+            {isFinal ? "Review Final Applicability Matrix" : "Review Next Stage Deliverables"}
+          </Link>
+        ) : null}
         <form action={action}>
           <button type="submit" className="button-secondary">
             {isFinal ? "Confirm Final Applicability Matrix" : "Confirm Next Stage Deliverables"}
@@ -620,15 +690,17 @@ function ReviewHistory({
   actionRegisterHref,
   activeIdentityLinkCandidates,
   canManageActiveIdentityLinks,
+  canRetryInvitations,
   cycles,
   gateActions,
   linkActiveIdentityAction,
   retryInvitationAction,
   selectedReviewCycleId,
 }: {
-  actionRegisterHref: string;
+  actionRegisterHref: string | null;
   activeIdentityLinkCandidates: (VerifiedApproverUser & { gateApproverId: string })[];
   canManageActiveIdentityLinks: boolean;
+  canRetryInvitations: boolean;
   cycles: GateReviewCycle[];
   gateActions: ProjectAction[];
   linkActiveIdentityAction: LinkActiveIdentityAction;
@@ -710,30 +782,7 @@ function ReviewHistory({
                     <Detail label="Related Stage" value={cycle.gate.stageLabel} />
                   </dl>
 
-                  <FrozenMatrixReviewEvidence cycle={cycle} />
-
-                  {cycle.frozenEvidence.criteria.length > 0 ? (
-                    <FrozenList
-                      heading={`Legacy Gate Criteria (${cycle.frozenEvidence.criteria.length})`}
-                      emptyLabel="No legacy Gate Criteria were included."
-                      items={cycle.frozenEvidence.criteria.map((criterion) => ({
-                        id: criterion.criterionId,
-                        title: criterion.description,
-                        detail: getGateCriterionStatusLabel(criterion.status),
-                      }))}
-                    />
-                  ) : null}
-                  <FrozenList
-                    heading={`Deliverables (${cycle.frozenEvidence.deliverables.length})`}
-                    emptyLabel="No Deliverables were included."
-                    items={cycle.frozenEvidence.deliverables.map((deliverable) => ({
-                      id: deliverable.deliverableId,
-                      title: deliverable.title,
-                       detail: deliverable.status === "not_applicable"
-                         ? "Not Applicable"
-                         : deliverableStatusLabels[deliverable.status],
-                    }))}
-                  />
+                  <FrozenGateReviewEvidence cycle={cycle} />
                   <FollowUpActionList
                     actionRegisterHref={actionRegisterHref}
                     cycle={cycle}
@@ -796,7 +845,7 @@ function ReviewHistory({
                              })() : null}
                             <InvitationDelivery
                               approver={approver}
-                              canRetry={canRetryGateReviewInvitation(
+                              canRetry={canRetryInvitations && canRetryGateReviewInvitation(
                                 cycle,
                                 approver.gateApproverId,
                               )}
@@ -829,39 +878,6 @@ function ReviewHistory({
         </div>
       )}
     </section>
-  );
-}
-
-function FrozenMatrixReviewEvidence({ cycle }: { cycle: GateReviewCycle }) {
-  const confirmation = cycle.frozenEvidence.matrixReviewConfirmation;
-  const matrix = cycle.frozenEvidence.applicabilityMatrix;
-  if (!confirmation || !matrix) return null;
-  const reviewedGates = confirmation.reviewScope === "final_lifecycle"
-    ? matrix.gates
-    : matrix.gates.filter((gate) => gate.stageId === confirmation.targetStageId);
-  const items = reviewedGates.flatMap((gate) => gate.items.map((item) => ({
-    id: `${gate.gateId}:${item.itemId}`,
-    title: `${gate.stageLabel}: ${item.title}`,
-    detail: `${applicabilityLabels[item.applicability === "to_be_determined" ? "applicable" : item.applicability]}${item.justification ? ` — Justification: ${item.justification}` : ""}`,
-  })));
-
-  return (
-    <div className="rounded-lg border border-blue-200 bg-blue-50 p-4">
-      <h4 className="text-sm font-semibold text-blue-950">Applicability Matrix confirmation</h4>
-      <p className="mt-1 text-sm text-blue-900">
-        {confirmation.targetStageLabel} confirmed {formatDateTime(confirmation.confirmedAt)} by {confirmation.reviewer.displayName}.
-      </p>
-      <p className="mt-1 break-all text-xs text-blue-800">
-        Fingerprint: {confirmation.matrixFingerprint}
-      </p>
-      <div className="mt-4">
-        <FrozenList
-          heading={`Reviewed Deliverables (${items.length})`}
-          emptyLabel="No Deliverables were included in the reviewed matrix scope."
-          items={items}
-        />
-      </div>
-    </div>
   );
 }
 
@@ -958,40 +974,12 @@ function invitationAttemptStatusLabel(
   return "Sending invitation";
 }
 
-function FrozenList({
-  heading,
-  emptyLabel,
-  items,
-}: {
-  heading: string;
-  emptyLabel: string;
-  items: { id: string; title: string; detail: string }[];
-}) {
-  return (
-    <div>
-      <h4 className="text-sm font-semibold text-slate-950">{heading}</h4>
-      {items.length === 0 ? (
-        <p className="mt-2 text-sm text-slate-500">{emptyLabel}</p>
-      ) : (
-        <ul className="mt-2 space-y-2">
-          {items.map((item) => (
-            <li key={item.id} className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm">
-              <p className="font-medium text-slate-900">{item.title}</p>
-              <p className="mt-1 text-slate-600">{item.detail}</p>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
-
 function FollowUpActionList({
   actionRegisterHref,
   cycle,
   gateActions,
 }: {
-  actionRegisterHref: string;
+  actionRegisterHref: string | null;
   cycle: GateReviewCycle;
   gateActions: ProjectAction[];
 }) {
@@ -1033,7 +1021,7 @@ function FollowUpActionList({
                     Frozen {item.hasApprovalSnapshot ? "at approval" : "Review evidence"}: {projectActionStatusLabels[item.frozenStatus]} | {item.assignee} | Due {formatDate(item.dueDate)}
                   </p>
                 </div>
-                {item.liveAction ? (
+                {item.liveAction && actionRegisterHref ? (
                   <Link
                     href={`${actionRegisterHref}#action-${encodeURIComponent(item.actionId)}`}
                     className="text-sm font-semibold text-blue-700 underline"
@@ -1081,11 +1069,13 @@ function groupApproversByLevel<Approver extends { approvalLevel: number }>(appro
 
 function DeliverableForm({
   action,
+  configurationLocked,
   deliverable,
   stageLabel,
   submitLabel,
 }: {
   action: FormAction;
+  configurationLocked: boolean;
   deliverable?: Deliverable;
   stageLabel: string;
   submitLabel: string;
@@ -1097,8 +1087,9 @@ function DeliverableForm({
         <input
           name="title"
           required
+          readOnly={configurationLocked}
           defaultValue={deliverable?.title}
-          className="h-11 rounded-lg border border-slate-300 bg-white px-3 text-slate-950 shadow-sm outline-none focus:border-slate-900 focus:ring-2 focus:ring-slate-200"
+          className={`h-11 rounded-lg border border-slate-300 px-3 text-slate-950 shadow-sm outline-none focus:border-slate-900 focus:ring-2 focus:ring-slate-200 ${configurationLocked ? "cursor-not-allowed bg-slate-100" : "bg-white"}`}
         />
       </label>
       <label className="grid gap-2 text-sm font-medium text-slate-700">
@@ -1185,44 +1176,11 @@ function GateActionForm({
         <div className="rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700 md:col-span-2">
           Related Package: <span className="font-semibold text-slate-950">{fixedPackage?.label ?? "Current Package"}</span>
         </div>
-       ) : packages.length > 0 ? (
-         <fieldset className="rounded-lg border border-slate-200 bg-white px-4 py-3 md:col-span-2">
-           <legend className="px-1 text-sm font-medium text-slate-700">Scope</legend>
-           <div className="mb-3 flex flex-wrap gap-5 text-sm text-slate-700">
-             <label className="flex items-center gap-2">
-               <input type="radio" name="scope" value="project" defaultChecked />
-               Project-level
-             </label>
-             <label className="flex items-center gap-2">
-               <input type="radio" name="scope" value="packages" />
-               Package(s)
-             </label>
-           </div>
-           <div className="grid gap-2 md:grid-cols-2">
-            {packages.map((projectPackage) => (
-              <label key={projectPackage.id} className="flex items-start gap-2 text-sm text-slate-700">
-                <input
-                  type="checkbox"
-                  name="packageIds"
-                  value={projectPackage.id}
-                  className="mt-1 size-4 accent-slate-900"
-                />
-                {projectPackage.label}
-              </label>
-            ))}
-          </div>
-        </fieldset>
        ) : (
-         <input type="hidden" name="scope" value="project" />
+         <div className="rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700 md:col-span-2">
+           Scope: <span className="font-semibold text-slate-950">Overall Project</span>
+         </div>
        )}
-      <label className="grid gap-2 text-sm font-medium text-slate-700 md:col-span-2">
-         Logged by
-         <input
-           name="actorName"
-           required
-           className="h-11 rounded-lg border border-slate-300 bg-white px-3 text-slate-950 shadow-sm"
-         />
-       </label>
        <label className="grid gap-2 text-sm font-medium text-slate-700 md:col-span-2">
          Initial update (optional)
          <textarea
@@ -1261,6 +1219,10 @@ function SummaryCard({
 function getApprovalStatus(gate: Gate) {
   const latestCycle = [...gate.reviewCycles]
     .sort((left, right) => right.cycleNumber - left.cycleNumber)[0];
+
+  if (gate.reapprovalRequired) {
+    return { value: "Reapproval required", valueClassName: "text-amber-700" };
+  }
 
   if (gate.status === "not_submitted") {
     return { value: "Not submitted", valueClassName: "text-slate-700" };
@@ -1374,18 +1336,18 @@ function deliverableStatusPriority(status: Deliverable["status"]) {
   return 3;
 }
 
-function deliverableContainerClass(status: Deliverable["status"]) {
-  if (status === "not_started") return "border-amber-200 bg-amber-50/70";
-  if (status === "in_progress") return "border-sky-200 bg-sky-50/70";
-  if (status === "completed") return "border-emerald-200 bg-emerald-50/50";
-  return "border-slate-200 bg-slate-50";
+function deliverableContainerClass(deliverable: Deliverable) {
+  if (deliverable.applicability === "not_applicable") {
+    return "border-slate-300 bg-slate-100/80";
+  }
+  if (deliverable.status === "completed") return "border-emerald-200 bg-emerald-50/50";
+  return "border-amber-200 bg-amber-50/70";
 }
 
-function deliverableStatusClass(status: Deliverable["status"]) {
-  if (status === "not_started") return "status-amber";
-  if (status === "in_progress") return "bg-sky-100 text-sky-800";
-  if (status === "completed") return "status-green";
-  return "status-not_assessed";
+function deliverableStatusClass(deliverable: Deliverable) {
+  if (deliverable.applicability === "not_applicable") return "status-not_assessed";
+  if (deliverable.status === "completed") return "status-green";
+  return "status-amber";
 }
 
 function gateStatusClass(status: Gate["status"]) {

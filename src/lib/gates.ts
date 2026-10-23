@@ -372,6 +372,9 @@ export type Gate<StageId extends string = string> = {
   name: string;
   stageId: StageId;
   status: GateStatus;
+  reapprovalRequired: boolean;
+  deliverableConfigurationLocked: boolean;
+  deliverableCompletionLocked: boolean;
   approvers: GateApprover[];
   reviewCycles: GateReviewCycle[];
   criteria: GateCriterion[];
@@ -465,6 +468,9 @@ export function createGates<StageId extends string>(
     name: definition.name,
     stageId: definition.stageId,
     status: "not_submitted",
+    reapprovalRequired: false,
+    deliverableConfigurationLocked: false,
+    deliverableCompletionLocked: false,
     approvers: [],
     reviewCycles: [],
     criteria: [],
@@ -476,7 +482,7 @@ export function normalizeGates<StageId extends string>(
   gates: Partial<Gate<StageId>>[] | undefined,
   definitions: GateDefinition<StageId>[],
 ): Gate<StageId>[] {
-  return definitions.map((definition) => {
+  const normalized = definitions.map((definition) => {
     const id = `${scopeId}:${definition.id}`;
     const existingGate = gates?.find((gate) => gate.id === id || gate.stageId === definition.stageId);
     const reviewCycles = normalizeGateReviewCycles(existingGate?.reviewCycles);
@@ -488,11 +494,41 @@ export function normalizeGates<StageId extends string>(
       name: normalizeGateName(existingGate?.name, definition),
       stageId: definition.stageId,
       status,
+      reapprovalRequired: existingGate?.reapprovalRequired === true,
+      deliverableConfigurationLocked: false,
+      deliverableCompletionLocked: false,
       approvers: normalizeGateApprovers(id, existingGate?.approvers),
       reviewCycles,
       criteria: [],
     };
   });
+  return normalized.map((gate, index) => ({
+    ...gate,
+    ...deriveStageDeliverableProtection(gate, normalized[index - 1] ?? null),
+  }));
+}
+
+export function deriveStageDeliverableProtection(
+  gate: Pick<Gate, "status" | "reapprovalRequired">,
+  previousGate: Pick<Gate, "status"> | null,
+) {
+  const ownGateFrozen = isGateDeliverableEvidenceFrozen(gate.status);
+  const controlledReopeningRevision = gate.reapprovalRequired
+    && (gate.status === "not_submitted" || gate.status === "returned_for_rework");
+  const precedingGateConfigurationFrozen = previousGate !== null
+    && isGateDeliverableEvidenceFrozen(previousGate.status)
+    && !controlledReopeningRevision;
+
+  return {
+    deliverableConfigurationLocked: ownGateFrozen || precedingGateConfigurationFrozen,
+    deliverableCompletionLocked: ownGateFrozen,
+  };
+}
+
+function isGateDeliverableEvidenceFrozen(status: GateStatus) {
+  return status === "submitted_for_approval"
+    || status === "approved"
+    || status === "approved_with_actions";
 }
 
 export function gatesRequireTemplateUpdate<StageId extends string>(

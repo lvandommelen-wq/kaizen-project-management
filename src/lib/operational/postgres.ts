@@ -76,6 +76,7 @@ import {
   loadGateDeliverables,
   loadPackage,
   loadPackages,
+  loadAuthorizedProjectActions,
   loadProject,
   loadProjectAction,
   loadProjectActions,
@@ -89,6 +90,16 @@ import {
 type Scope = {
   projectId: string;
   packageId: string | null;
+};
+
+export type GateReopeningResult<Entity> = {
+  entity: Entity;
+  gateId: string;
+  reviewCycleId: string;
+  previousStage: string;
+  targetStage: string;
+  reason: string;
+  reopenedAt: string;
 };
 
 type InvitationClaim = {
@@ -209,11 +220,6 @@ function lifecycleNext<T extends string>(stages: readonly T[], current: T) {
   return stages[index + 1] ?? null;
 }
 
-function lifecyclePrevious<T extends string>(stages: readonly T[], current: T) {
-  const index = stages.indexOf(current);
-  return stages[index - 1] ?? null;
-}
-
 function projectLifecycle(validationRequired: boolean) {
   return validationRequired
     ? projectStageOrder
@@ -267,8 +273,23 @@ export async function getArchivedProject(projectId: string) {
   return withOperationalClient((client) => loadProject(client, projectId, true));
 }
 
-export async function createProject(input: ProjectFormInput, ownerUserId?: string) {
+export async function createProject(input: ProjectFormInput, ownerUserId: string) {
   return withOperationalTransaction(async (client) => {
+    const authorization = await client.query(
+      `SELECT 1
+       FROM project_creation_authorization AS creation_authorization
+       JOIN app_user ON app_user.id = creation_authorization.user_id
+       WHERE creation_authorization.user_id = $1
+         AND creation_authorization.revoked_at IS NULL
+         AND app_user.status = 'active'
+         AND app_user.access_class = 'internal'
+         AND app_user.last_authenticated_at IS NOT NULL
+       FOR SHARE OF creation_authorization, app_user`,
+      [ownerUserId],
+    );
+    if (authorization.rowCount !== 1) {
+      throw new Error("You are not authorized to create Projects.");
+    }
     const id = randomUUID();
     const now = new Date().toISOString();
     await client.query(
@@ -297,13 +318,11 @@ export async function createProject(input: ProjectFormInput, ownerUserId?: strin
       "INSERT INTO project_action_sequence (project_id, next_sequence) VALUES ($1, 1)",
       [id],
     );
-    if (ownerUserId) {
-      await client.query(
-        `INSERT INTO project_membership (project_id, user_id, role, created_at, updated_at)
-         VALUES ($1, $2, 'owner', $3, $3)`,
-        [id, ownerUserId, now],
-      );
-    }
+    await client.query(
+      `INSERT INTO project_membership (project_id, user_id, role, created_at, updated_at)
+       VALUES ($1, $2, 'owner', $3, $3)`,
+      [id, ownerUserId, now],
+    );
     const templates = getProjectGateTemplates(input.validationRequired);
     await insertGatesAndDefaultDeliverables(
       client,
@@ -583,6 +602,18 @@ async function lockScopeGate(
   return loadGate(client, scope.projectId, scope.packageId, gateId);
 }
 
+function configurationBaselineProtectionError() {
+  return new Error(
+    "This Stage Deliverable configuration is protected by a submitted or approved Gate. Withdraw or return an active submission, or formally reopen the approved governing Gate, before revising it.",
+  );
+}
+
+function completionBaselineProtectionError() {
+  return new Error(
+    "This Stage Deliverable completion evidence is protected by its submitted or approved Gate. Withdraw or return an active submission, or formally reopen the approved Gate, before changing completion status.",
+  );
+}
+
 export async function getGateDeliverables(
   projectId: string,
   packageId: string | null,
@@ -597,7 +628,13 @@ export async function createDeliverable(input: DeliverableInput) {
   return withOperationalTransaction(async (client) => {
     const scope = { projectId: input.projectId, packageId: input.packageId };
     const gate = await lockScopeGate(client, scope, input.gateId);
-    if (!gate || !isGateInPreparation(gate)) {
+    if (!gate) {
+      throw new Error("The Deliverable Gate could not be found.");
+    }
+    if (gate.deliverableConfigurationLocked) {
+      throw configurationBaselineProtectionError();
+    }
+    if (!isGateInPreparation(gate)) {
       throw new Error("Deliverables can only be changed while the Gate is in preparation.");
     }
     const sequenceResult = await client.query(
@@ -643,7 +680,7 @@ export async function updateDeliverable(
   return withOperationalTransaction(async (client) => {
     const scope = { projectId: input.projectId, packageId: input.packageId };
     const gate = await lockScopeGate(client, scope, input.gateId);
-    if (!gate || !isGateInPreparation(gate)) return null;
+    if (!gate) return null;
     const locked = await client.query(
       `SELECT * FROM deliverable
        WHERE id = $1 FOR UPDATE`,
@@ -658,6 +695,20 @@ export async function updateDeliverable(
     ) {
       return null;
     }
+    if (
+      gate.deliverableConfigurationLocked
+      && (
+        row.title !== input.title
+        || row.stage_id !== input.stageId
+        || row.scope_level !== input.scopeLevel
+      )
+    ) {
+      throw configurationBaselineProtectionError();
+    }
+    if (gate.deliverableCompletionLocked && row.status !== input.status) {
+      throw completionBaselineProtectionError();
+    }
+    if (!isGateInPreparation(gate)) return null;
     const now = new Date().toISOString();
     await client.query(
       `UPDATE deliverable SET title = $2, status = $3,
@@ -683,7 +734,9 @@ export async function deleteDeliverable(
 ) {
   return withOperationalTransaction(async (client) => {
     const gate = await lockScopeGate(client, context, context.gateId);
-    if (!gate || !isGateInPreparation(gate)) return false;
+    if (!gate) return false;
+    if (gate.deliverableConfigurationLocked) throw configurationBaselineProtectionError();
+    if (!isGateInPreparation(gate)) return false;
     if (await itemHasReviewEvidence(client, context, "deliverable", deliverableId)) {
       return false;
     }
@@ -731,6 +784,7 @@ async function synchronizeGateDefaultDeliverables<StageId extends string>(
   template: GovernanceGateTemplate<StageId>,
 ) {
   if (!isGateInPreparation(gate)) return;
+  if (gate.deliverableConfigurationLocked) return;
   const maximumResult = await client.query(
     "SELECT coalesce(max(sequence), 0) AS sequence FROM deliverable WHERE gate_id = $1",
     [gate.id],
@@ -740,7 +794,7 @@ async function synchronizeGateDefaultDeliverables<StageId extends string>(
   for (const definition of template.deliverables) {
     const id = `${gate.id}:deliverable:${definition.id}`;
     await client.query(
-      `INSERT INTO deliverable (
+      `INSERT INTO deliverable AS existing (
          id, template_id, template_version, project_id, package_id, gate_id,
          sequence, title, description, status, stage_id, scope_level,
           created_at, updated_at, applicability, applicability_origin,
@@ -748,12 +802,25 @@ async function synchronizeGateDefaultDeliverables<StageId extends string>(
        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'not_started',
            $10, $11, $12, $12, $13, 'template', $14)
         ON CONFLICT (gate_id, template_id) WHERE template_id IS NOT NULL
-        DO UPDATE SET template_version = EXCLUDED.template_version,
-          title = EXCLUDED.title,
-          description = EXCLUDED.description,
-          applicability_locked = EXCLUDED.applicability_locked,
-          updated_at = EXCLUDED.updated_at
-       `,
+         DO UPDATE SET template_version = EXCLUDED.template_version,
+           title = EXCLUDED.title,
+           description = EXCLUDED.description,
+           applicability_locked = EXCLUDED.applicability_locked,
+           updated_at = EXCLUDED.updated_at
+         WHERE (existing.template_version IS NULL
+             OR existing.template_version < EXCLUDED.template_version)
+           AND ROW(
+             existing.template_version,
+             existing.title,
+             existing.description,
+             existing.applicability_locked
+           ) IS DISTINCT FROM ROW(
+             EXCLUDED.template_version,
+             EXCLUDED.title,
+             EXCLUDED.description,
+             EXCLUDED.applicability_locked
+           )
+        `,
       [
         id,
         definition.id,
@@ -775,36 +842,24 @@ async function synchronizeGateDefaultDeliverables<StageId extends string>(
   }
 
   await client.query(
-    "UPDATE gate SET template_version = greatest(template_version, $2) WHERE id = $1",
+    `UPDATE gate SET template_version = $2
+     WHERE id = $1 AND (template_version IS NULL OR template_version < $2)`,
     [gate.id, template.templateVersion],
   );
 }
 
 export async function getApplicabilityReview(projectId: string, packageId: string | null) {
-  return withOperationalTransaction(async (client) => {
+  return withOperationalClient(async (client) => {
     const project = await loadProject(client, projectId);
     const entity = packageId ? await loadPackage(client, projectId, packageId) : project;
     if (!project || !entity) return null;
     const gates = packageId ? (entity as ProjectPackage).gates : project.gates;
-    const templates = packageId ? packageGateTemplates : getProjectGateTemplates(project.validationRequired);
-
-    for (const gate of gates) {
-      if (!isGateInPreparation(gate)) continue;
-      const template = templates.find((candidate) => candidate.stageId === gate.stageId);
-      if (template) await synchronizeGateDefaultDeliverables(client, { projectId, packageId }, gate, template);
-    }
-
-    const refreshed = packageId
-      ? await loadPackage(client, projectId, packageId)
-      : await loadProject(client, projectId);
-    if (!refreshed) return null;
-    const refreshedGates = packageId ? (refreshed as ProjectPackage).gates : (refreshed as Project).gates;
     const reviewGates: Array<{
       gate: Gate;
       stageLabel: string;
       deliverables: Deliverable[];
     }> = [];
-    for (const gate of refreshedGates) {
+    for (const gate of gates) {
       reviewGates.push({
         gate,
         stageLabel: packageId ? packageStageLabel(gate.stageId) : projectStageLabel(gate.stageId),
@@ -836,15 +891,15 @@ export async function getApplicabilityReview(projectId: string, packageId: strin
         : new Date(String(row.changed_at)).toISOString(),
       changedByDisplayName: String(row.changed_by_display_name),
     }));
-    const methodologyApproved = refreshedGates.some((gate) =>
+    const methodologyApproved = gates.some((gate) =>
       gate.stageId === (packageId ? "definition" : "initiation") &&
       gate.reviewCycles.some((cycle) => cycle.status === "approved" || cycle.status === "approved_with_actions"));
-    const methodologyAwaitingApproval = refreshedGates.some((gate) =>
+    const methodologyAwaitingApproval = gates.some((gate) =>
       gate.stageId === (packageId ? "definition" : "initiation") &&
       gate.reviewCycles.some((cycle) => cycle.status === "awaiting_approval"));
     return {
       project,
-      entity: refreshed,
+      entity,
       gates: reviewGates,
       changes,
       methodologyApproved,
@@ -970,7 +1025,7 @@ export async function getGateMatrixReview(
   packageId: string | null,
   gateId: string,
 ) {
-  return withOperationalTransaction((client) =>
+  return withOperationalClient((client) =>
     loadGateMatrixReviewContext(client, { projectId, packageId }, gateId));
 }
 
@@ -1065,6 +1120,7 @@ export async function updateApplicabilityItem(input: ApplicabilityMutationInput,
     const scope = { projectId: input.projectId, packageId: input.packageId };
     const gate = await lockScopeGate(client, scope, input.gateId);
     if (!gate) return null;
+    if (gate.deliverableConfigurationLocked) throw configurationBaselineProtectionError();
     if (gate.status === "submitted_for_approval" || await scopeHasActiveMethodologyReview(client, scope)) {
       throw new Error("Applicability cannot be changed while the relevant Review Cycle is awaiting approval.");
     }
@@ -1134,6 +1190,7 @@ export async function createApplicabilityItem(input: {
     const scope = { projectId: input.projectId, packageId: input.packageId };
     const gate = await lockScopeGate(client, scope, input.gateId);
     if (!gate) return null;
+    if (gate.deliverableConfigurationLocked) throw configurationBaselineProtectionError();
     if (gate.status === "submitted_for_approval" || await scopeHasActiveMethodologyReview(client, scope)) {
       throw new Error("Items cannot be added while the relevant Review Cycle is awaiting approval.");
     }
@@ -1180,7 +1237,9 @@ export async function deleteApplicabilityItem(input: {
   return withOperationalTransaction(async (client) => {
     const scope = { projectId: input.projectId, packageId: input.packageId };
     const gate = await lockScopeGate(client, scope, input.gateId);
-    if (!gate || gate.status === "submitted_for_approval" || await scopeHasActiveMethodologyReview(client, scope)) return false;
+    if (!gate) return false;
+    if (gate.deliverableConfigurationLocked) throw configurationBaselineProtectionError();
+    if (gate.status === "submitted_for_approval" || await scopeHasActiveMethodologyReview(client, scope)) return false;
     if (await itemHasReviewEvidence(client, scope, input.itemType, input.itemId)) {
       return false;
     }
@@ -1665,6 +1724,18 @@ export async function getProjectAction(projectId: string, actionId: string) {
   );
 }
 
+export async function getAuthorizedProjectActions(
+  projectId: string,
+  input: {
+    allowOverall: boolean;
+    packageIds: string[];
+    actionId?: string;
+  },
+) {
+  return withOperationalClient((client) =>
+    loadAuthorizedProjectActions(client, projectId, input));
+}
+
 export async function getArchivedProjectActions(projectId: string) {
   return withOperationalClient((client) =>
     loadProjectActions(client, projectId, true),
@@ -1731,6 +1802,9 @@ async function validateActionLinks(
   gateId: string | null,
 ) {
   const uniquePackageIds = [...new Set(packageIds)];
+  if (uniquePackageIds.length > 1) {
+    throw new Error("An Action may reference at most one Package.");
+  }
   if (uniquePackageIds.length !== packageIds.length) {
     throw new Error("One or more selected Packages are invalid.");
   }
@@ -1802,6 +1876,9 @@ async function replaceActionPackages(
   projectId: string,
   packageIds: string[],
 ) {
+  if (packageIds.length > 1 || new Set(packageIds).size !== packageIds.length) {
+    throw new Error("An Action may reference at most one Package.");
+  }
   await client.query("DELETE FROM project_action_package WHERE action_id = $1", [actionId]);
   for (const [index, packageId] of packageIds.entries()) {
     await client.query(
@@ -1858,6 +1935,17 @@ async function createAction(
     ) {
       throw new Error("Gate Actions can only be created while the current Gate is in preparation.");
     }
+    const expectedPackageIds = gate.package_id ? [String(gate.package_id)] : [];
+    if (
+      expectedPackageIds.length !== input.packageIds.length
+      || expectedPackageIds.some((packageId) => !input.packageIds.includes(packageId))
+    ) {
+      throw new Error(
+        gate.package_id
+          ? "A Package Gate Action must remain scoped to its own Package."
+          : "A Project Gate Action must remain Overall Project scoped.",
+      );
+    }
     const activeCycle = await client.query(
       `SELECT 1 FROM gate_review_cycle
        WHERE gate_id = $1 AND status = 'awaiting_approval'`,
@@ -1897,7 +1985,7 @@ async function createAction(
       input.governanceTierId,
       input.gateId,
       source,
-      packageAssociationLocked,
+      source === "gate" ? true : packageAssociationLocked,
       loggedBy.userId,
       loggedBy.displayName,
       now,
@@ -2133,6 +2221,7 @@ async function reconcileGateFollowUpStatus(
   const updated = await client.query(
     `UPDATE gate SET status = $3
      WHERE project_id = $1 AND id = $2
+       AND reapproval_required = false
        AND status IN ('approved', 'approved_with_actions')
        AND status IS DISTINCT FROM $3
      RETURNING status`,
@@ -2203,7 +2292,7 @@ export async function updateProjectAction(
     if (action.status !== "closed" && input.status === "closed") {
       throw new Error("Use Close to close an Action.");
     }
-    const nextPackageIds = action.packageAssociationLocked
+    const nextPackageIds = action.source === "gate" || action.packageAssociationLocked
       ? action.packageIds
       : input.packageIds;
     const nextGateId = action.source === "gate" ? action.gateId : input.gateId;
@@ -2778,40 +2867,60 @@ async function withdrawGateSubmission(
   const gate = await lockScopeGate(client, scope, gateId);
   if (!gate) return null;
   if (!withdrawnBy.userId || !withdrawnBy.providerTenantId || !withdrawnBy.providerObjectId) {
-    throw new Error("An authenticated Project Owner is required to withdraw a Gate Review Cycle.");
+    throw new Error("An authenticated authorized User is required to withdraw a Gate Review Cycle.");
   }
-  const ownerResult = await client.query(
+  const authorityResult = await client.query(
     `SELECT app_user.id, app_user.display_name, app_user.email,
-            user_identity.provider_tenant_id, user_identity.provider_object_id
-     FROM project_membership
-     JOIN app_user ON app_user.id = project_membership.user_id
+             user_identity.provider_tenant_id, user_identity.provider_object_id
+     FROM app_user
      JOIN user_identity
        ON user_identity.user_id = app_user.id
       AND user_identity.provider = 'microsoft'
-     WHERE project_membership.project_id = $1
-       AND project_membership.user_id = $2
-       AND project_membership.role = 'owner'
+     WHERE app_user.id = $2
        AND app_user.status = 'active'
        AND app_user.access_class = 'internal'
        AND user_identity.provider_tenant_id = $3
-       AND user_identity.provider_object_id = $4`,
+       AND user_identity.provider_object_id = $4
+       AND (
+         EXISTS (
+           SELECT 1 FROM project_membership
+           WHERE project_membership.project_id = $1
+             AND project_membership.user_id = app_user.id
+             AND project_membership.role = 'owner'
+         )
+         OR ($5::text IS NOT NULL AND EXISTS (
+           SELECT 1
+           FROM access_grant
+           JOIN access_grant_permission
+             ON access_grant_permission.grant_id = access_grant.id
+           WHERE access_grant.project_id = $1
+             AND access_grant.package_id = $5
+             AND access_grant.user_id = app_user.id
+             AND access_grant.scope_type = 'specific_package'
+             AND access_grant.authority_role = 'package_lead'
+             AND access_grant.revoked_at IS NULL
+             AND access_grant_permission.module = 'gate_reviews'
+             AND access_grant_permission.permission = 'read_write'
+         ))
+       )`,
     [
       scope.projectId,
       withdrawnBy.userId,
       withdrawnBy.providerTenantId,
       withdrawnBy.providerObjectId,
+      scope.packageId,
     ],
   );
-  if (ownerResult.rowCount !== 1) {
-    throw new Error("Only an authenticated Project Owner may withdraw a Gate Review Cycle.");
+  if (authorityResult.rowCount !== 1) {
+    throw new Error("Only an authorized Project Owner or Package Lead may withdraw this Gate Review Cycle.");
   }
-  const owner = ownerResult.rows[0];
-  const authenticatedOwner: GateReviewActorSnapshot = {
-    userId: String(owner.id),
-    displayName: String(owner.display_name),
-    email: String(owner.email),
-    providerTenantId: String(owner.provider_tenant_id),
-    providerObjectId: String(owner.provider_object_id),
+  const authorizedActor = authorityResult.rows[0];
+  const authenticatedActor: GateReviewActorSnapshot = {
+    userId: String(authorizedActor.id),
+    displayName: String(authorizedActor.display_name),
+    email: String(authorizedActor.email),
+    providerTenantId: String(authorizedActor.provider_tenant_id),
+    providerObjectId: String(authorizedActor.provider_object_id),
   };
   const project = await loadProject(client, scope.projectId);
   const entity = scope.packageId
@@ -2825,7 +2934,7 @@ async function withdrawGateSubmission(
   const now = new Date().toISOString();
   const result = withdrawGateReviewCycle(gate, {
     withdrawnAt: now,
-    withdrawnBy: authenticatedOwner,
+    withdrawnBy: authenticatedActor,
     withdrawalReason,
   });
   if (result.outcome !== "withdrawn") return result;
@@ -2904,89 +3013,112 @@ export async function withdrawPackageGateSubmission(
   );
 }
 
-async function reopenGate(client: PoolClient, scope: Scope, gateId: string) {
+async function reopenGate(
+  client: PoolClient,
+  scope: Scope,
+  gateId: string,
+  reopeningReason: string,
+) {
+  const reason = reopeningReason.trim();
+  if (!reason) throw new Error("A reopening reason is required.");
   const gate = await lockScopeGate(client, scope, gateId);
   if (!gate) return null;
-  if (gate.status === "approved" || gate.status === "approved_with_actions") {
-    const now = new Date().toISOString();
-    await client.query("UPDATE gate SET status = 'not_submitted' WHERE id = $1", [gateId]);
-    await touchScope(client, scope, now);
+  const entity = scope.packageId
+    ? await loadPackage(client, scope.projectId, scope.packageId)
+    : await loadProject(client, scope.projectId);
+  if (!entity) return null;
+  const gates = entity.gates;
+  if (gates.some((candidate) => candidate.reapprovalRequired)) {
+    throw new Error(
+      "The currently reopened Gate must be formally approved before another Gate can be reopened.",
+    );
   }
-  return scope.packageId
+  const currentStageIndex = gates.findIndex(
+    (candidate) => candidate.stageId === entity.currentStage,
+  );
+  const eligibleGate = gates[currentStageIndex - 1];
+  if (!eligibleGate || eligibleGate.id !== gateId) {
+    throw new Error(
+      "Only the immediately preceding approved Gate that advanced this lifecycle may be reopened.",
+    );
+  }
+  if (gate.status !== "approved" && gate.status !== "approved_with_actions") {
+    throw new Error("Only the immediately preceding approved Gate may be reopened.");
+  }
+  const currentGate = gates[currentStageIndex];
+  if (
+    currentGate
+    && (
+      currentGate.status === "submitted_for_approval"
+      || currentGate.status === "approved"
+      || currentGate.status === "approved_with_actions"
+    )
+  ) {
+    throw new Error(
+      "The current Stage already has an active or approved Gate Review and cannot move backward.",
+    );
+  }
+  const approvedCycle = [...gate.reviewCycles].reverse().find(
+    (cycle) => cycle.status === "approved" || cycle.status === "approved_with_actions",
+  );
+  if (!approvedCycle) {
+    throw new Error("The selected Gate has no approved Review Cycle that advanced this lifecycle.");
+  }
+
+  const now = new Date().toISOString();
+  await client.query(
+    `UPDATE gate
+     SET status = 'not_submitted', reapproval_required = true
+     WHERE id = $1`,
+    [gateId],
+  );
+  if (scope.packageId) {
+    await client.query(
+      `UPDATE project_package SET current_stage = $3, updated_at = $4
+       WHERE project_id = $1 AND id = $2`,
+      [scope.projectId, scope.packageId, gate.stageId, now],
+    );
+  } else {
+    await client.query(
+      "UPDATE project SET current_stage = $2, updated_at = $3 WHERE id = $1",
+      [scope.projectId, gate.stageId, now],
+    );
+  }
+  const updatedEntity = scope.packageId
     ? loadPackage(client, scope.projectId, scope.packageId)
     : loadProject(client, scope.projectId);
+  const loaded = await updatedEntity;
+  if (!loaded) throw new Error("The reopened lifecycle scope could not be loaded.");
+  return {
+    entity: loaded,
+    gateId,
+    reviewCycleId: approvedCycle.id,
+    previousStage: String(entity.currentStage),
+    targetStage: String(gate.stageId),
+    reason,
+    reopenedAt: now,
+  };
 }
 
-export function reopenProjectGate(projectId: string, gateId: string) {
+export function reopenProjectGate(
+  projectId: string,
+  gateId: string,
+  reopeningReason: string,
+) {
   return withOperationalTransaction((client) =>
-    reopenGate(client, { projectId, packageId: null }, gateId),
-  ) as Promise<Project | null>;
+    reopenGate(client, { projectId, packageId: null }, gateId, reopeningReason),
+  ) as Promise<GateReopeningResult<Project> | null>;
 }
 
 export function reopenPackageGate(
   projectId: string,
   packageId: string,
   gateId: string,
+  reopeningReason: string,
 ) {
   return withOperationalTransaction((client) =>
-    reopenGate(client, { projectId, packageId }, gateId),
-  ) as Promise<ProjectPackage | null>;
-}
-
-export async function returnProjectToPreviousStage(projectId: string) {
-  return withOperationalTransaction(async (client) => {
-    const lock = await client.query(
-      `SELECT current_stage, validation_required FROM project
-       WHERE id = $1 AND archived_at IS NULL FOR UPDATE`,
-      [projectId],
-    );
-    if (lock.rowCount === 0) return null;
-    const project = await loadProject(client, projectId);
-    if (!project) return null;
-    if (project.gates.some((gate) => gate.status === "submitted_for_approval")) {
-      return project;
-    }
-    const previous = lifecyclePrevious(
-      projectLifecycle(project.validationRequired),
-      project.currentStage,
-    );
-    if (!previous) return project;
-    await client.query(
-      "UPDATE project SET current_stage = $2, updated_at = $3 WHERE id = $1",
-      [projectId, previous, new Date().toISOString()],
-    );
-    return loadProject(client, projectId);
-  });
-}
-
-export async function returnPackageToPreviousStage(
-  projectId: string,
-  packageId: string,
-) {
-  return withOperationalTransaction(async (client) => {
-    const lock = await client.query(
-      `SELECT package.current_stage FROM project_package AS package
-       JOIN project ON project.id = package.project_id
-       WHERE package.project_id = $1 AND package.id = $2
-         AND package.archived_at IS NULL AND project.archived_at IS NULL
-       FOR UPDATE OF package`,
-      [projectId, packageId],
-    );
-    if (lock.rowCount === 0) return null;
-    const projectPackage = await loadPackage(client, projectId, packageId);
-    if (!projectPackage) return null;
-    if (projectPackage.gates.some((gate) => gate.status === "submitted_for_approval")) {
-      return projectPackage;
-    }
-    const previous = lifecyclePrevious(packageStageOrder, projectPackage.currentStage);
-    if (!previous) return projectPackage;
-    await client.query(
-      `UPDATE project_package SET current_stage = $3, updated_at = $4
-       WHERE project_id = $1 AND id = $2`,
-      [projectId, packageId, previous, new Date().toISOString()],
-    );
-    return loadPackage(client, projectId, packageId);
-  });
+    reopenGate(client, { projectId, packageId }, gateId, reopeningReason),
+  ) as Promise<GateReopeningResult<ProjectPackage> | null>;
 }
 
 async function claimGateReviewInvitation(
@@ -4029,10 +4161,20 @@ export async function internalRecordIdentityBoundGateReviewResponse(
         [input.reviewCycleId, approverId, now],
       );
     }
-    await client.query("UPDATE gate SET status = $2 WHERE id = $1", [
-      input.gateId,
-      currentGate.status,
-    ]);
+    await client.query(
+      `UPDATE gate SET status = $2,
+         reapproval_required = CASE
+           WHEN $3::boolean THEN false
+           ELSE reapproval_required
+         END
+       WHERE id = $1`,
+      [
+        input.gateId,
+        currentGate.status,
+        transition.completion === "approved"
+          || transition.completion === "approved_with_actions",
+      ],
+    );
     if (transition.completion === "approved_with_actions") {
       await reconcileGateFollowUpStatus(
         client,

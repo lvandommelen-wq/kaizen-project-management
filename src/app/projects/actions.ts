@@ -24,7 +24,6 @@ import {
   moveProjectGovernanceTier,
   parseGovernanceTierFormData,
   parseProjectFormDataWithOptions,
-  returnProjectToPreviousStage,
   updateProjectGovernanceTier,
   updateProject,
 } from "@/lib/projects";
@@ -185,27 +184,6 @@ export async function deleteProjectGovernanceTierAction(
 
   revalidateProjectGovernance(projectId);
   redirect(projectGovernancePath(projectId));
-}
-
-export async function returnProjectToPreviousStageAction(projectId: string) {
-  const project = await withAuthorizedProjectMutation({
-    projectId,
-    minimumRole: "editor",
-    audit: {
-      eventType: "project.stage_returned",
-      resourceType: "project",
-      resourceId: projectId,
-    },
-    operation: () => returnProjectToPreviousStage(projectId),
-  });
-
-  if (!project) {
-    notFound();
-  }
-
-  revalidatePath("/projects");
-  revalidatePath(`/projects/${projectId}`);
-  redirect(`/projects/${projectId}`);
 }
 
 export async function deleteProjectAction(projectId: string) {

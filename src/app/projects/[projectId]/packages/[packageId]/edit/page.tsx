@@ -1,9 +1,8 @@
 import { notFound } from "next/navigation";
-import { getPackage } from "@/lib/packages";
-import { getProject } from "@/lib/projects";
 import { PackageForm } from "../../_components/package-form";
 import { updatePackageAction } from "../../actions";
-import { getCurrentProjectRole } from "@/lib/authorization";
+import { requireInternalUser } from "@/lib/authorization";
+import { getAuthorizedPackageContext } from "@/lib/package-access";
 
 export const dynamic = "force-dynamic";
 
@@ -11,19 +10,16 @@ export default async function EditPackagePage({
   params,
 }: PageProps<"/projects/[projectId]/packages/[packageId]/edit">) {
   const { projectId, packageId } = await params;
-  const access = await getCurrentProjectRole(projectId);
-  if (!access || access.role === "viewer") notFound();
-  const project = await getProject(projectId);
-
-  if (!project) {
-    notFound();
-  }
-
-  const projectPackage = await getPackage(project.id, packageId);
-
-  if (!projectPackage) {
-    notFound();
-  }
+  const user = await requireInternalUser();
+  const context = await getAuthorizedPackageContext({
+    user,
+    projectId,
+    packageId,
+    module: "overview",
+    requestedPermission: "read_write",
+  });
+  if (!context) notFound();
+  const { project, projectPackage } = context;
 
   const updateAction = updatePackageAction.bind(null, project.id, projectPackage.id);
 

@@ -16,9 +16,10 @@ import {
 } from "@/app/projects/gate-actions";
 import { getGateDeliverables } from "@/lib/deliverables";
 import { getPackages } from "@/lib/packages";
-import { getGateActions } from "@/lib/project-actions";
 import { getProject, projectStageLabels } from "@/lib/projects";
 import { getCurrentProjectRole } from "@/lib/authorization";
+import { getAuthorizedGateActionView } from "@/lib/action-register";
+import { accessPermissionAllows } from "@/lib/access-permissions";
 import { getActiveGateReviewIdentityLinkCandidates } from "@/lib/operational/postgres";
 import { getAwaitingGateReviewCycle, getGateSubmissionIssues } from "@/lib/gates";
 import { getOperationalDataBackend } from "@/lib/operational/backend";
@@ -60,7 +61,16 @@ export default async function ProjectGatePage({
   const applicabilityEntryDeliverable = deliverables.find(
     (deliverable) => deliverable.templateId === "project_stage_gate_applicability_matrix",
   );
-  const gateActions = await getGateActions(project.id, readinessGate.id);
+  const actionView = await getAuthorizedGateActionView({
+    user: access.user,
+    projectId: project.id,
+    packageId: null,
+    gateId: readinessGate.id,
+    legacyPermission: access.role === "viewer" ? "read" : "read_write",
+  });
+  const canReadActions = accessPermissionAllows(actionView.permission, "read");
+  const canWriteActions = accessPermissionAllows(actionView.permission, "read_write");
+  const gateActions = actionView.actions;
   const submissionIssues = [
     ...getGateSubmissionIssues(
       readinessGate,
@@ -84,19 +94,37 @@ export default async function ProjectGatePage({
       })
     : [];
   const submittedCycleNumber = parseCycleNumber(query.submitted);
+  const currentStageIndex = project.gates.findIndex(
+    (candidate) => candidate.stageId === project.currentStage,
+  );
+  const currentStageGate = project.gates[currentStageIndex];
+  const canReopenGate = access.role === "owner"
+    && project.gates[currentStageIndex - 1]?.id === gate.id
+    && (gate.status === "approved" || gate.status === "approved_with_actions")
+    && !project.gates.some((candidate) => candidate.reapprovalRequired)
+    && currentStageGate?.status !== "submitted_for_approval"
+    && currentStageGate?.status !== "approved"
+    && currentStageGate?.status !== "approved_with_actions";
 
   return (
     <GateDetail
       backHref={`/projects/${project.id}`}
-      backLabel="Project"
+      backLabel="Current project"
       contextLabel={`${project.projectNumber} - ${project.name}`}
       applicabilityHref={`/projects/${project.id}/applicability`}
       applicabilityEntryDeliverableId={applicabilityEntryDeliverable?.id}
       actionRegisterHref={`/projects/${project.id}/actions`}
       approvalError={parseQueryValue(query.approvalError)}
-      canEdit={access.role !== "viewer"}
+      canManageGateReviews={access.role !== "viewer"}
+      canReadGateReviews
+      canReadDeliverables
+      canEditDeliverables={access.role !== "viewer"}
+      canReadActions={canReadActions}
+      canWriteActions={canWriteActions}
       canManageActiveIdentityLinks={access.role === "owner"}
       canWithdrawSubmission={access.role === "owner"}
+      canRetryInvitations={access.role !== "viewer"}
+      canReopenGate={canReopenGate}
       activeIdentityLinkCandidates={activeIdentityLinkCandidates}
       invitationFailureCount={parsePositiveInteger(query.invitationFailures)}
       approvalResponseAction={respondToProjectGateReviewAction.bind(

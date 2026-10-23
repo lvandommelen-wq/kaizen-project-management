@@ -2,16 +2,16 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { DeleteConfirmation } from "../../../_components/delete-confirmation";
 import { LifecycleProgress } from "../../../_components/lifecycle-progress";
-import { deletePackageAction, returnPackageToPreviousStageAction } from "../actions";
+import { deletePackageAction } from "../actions";
 import {
   formatPackageExecutionModel,
-  getPackage,
   getPackageLifecycle,
-  getPreviousPackageStage,
   packageStageLabels,
 } from "@/lib/packages";
-import { getProject } from "@/lib/projects";
-import { getCurrentProjectRole } from "@/lib/authorization";
+import { requireInternalUser } from "@/lib/authorization";
+import { canManagePackageAccess } from "@/lib/access-management";
+import { accessPermissionAllows } from "@/lib/access-permissions";
+import { getAuthorizedPackageContext } from "@/lib/package-access";
 
 export const dynamic = "force-dynamic";
 
@@ -21,26 +21,25 @@ export default async function PackageDetailPage({
 }: PageProps<"/projects/[projectId]/packages/[packageId]">) {
   const { projectId, packageId } = await params;
   const query = await searchParams;
-  if (!await getCurrentProjectRole(projectId)) notFound();
-  const project = await getProject(projectId);
-
-  if (!project) {
-    notFound();
-  }
-
-  const projectPackage = await getPackage(project.id, packageId);
-
-  if (!projectPackage) {
-    notFound();
-  }
+  const user = await requireInternalUser();
+  const context = await getAuthorizedPackageContext({
+    user,
+    projectId,
+    packageId,
+    module: "overview",
+  });
+  if (!context) notFound();
+  const { project, projectPackage, permissions, projectRole } = context;
 
   const lifecycle = getPackageLifecycle();
-  const previousStage = getPreviousPackageStage(projectPackage.currentStage);
   const currentGate = projectPackage.gates.find((gate) => gate.stageId === projectPackage.currentStage);
-  const returnAction = previousStage
-    ? returnPackageToPreviousStageAction.bind(null, project.id, projectPackage.id)
-    : null;
   const deleteAction = deletePackageAction.bind(null, project.id, projectPackage.id);
+  const canManageAccess = await canManagePackageAccess(user, project.id, projectPackage.id);
+  const canEditOverview = accessPermissionAllows(permissions.overview, "read_write");
+  const canReadDeliverables = accessPermissionAllows(permissions.deliverables, "read");
+  const canReadGateReviews = accessPermissionAllows(permissions.gate_reviews, "read");
+  const canReadActions = accessPermissionAllows(permissions.actions, "read");
+  const canDeletePackage = projectRole === "owner";
 
   return (
     <div className="space-y-8">
@@ -49,29 +48,44 @@ export default async function PackageDetailPage({
           <p className="eyebrow">{project.projectNumber} - {project.name}</p>
           <h1>{projectPackage.packageCode} - {projectPackage.packageName}</h1>
         </div>
-        <div className="flex gap-3">
-          <Link href={`/projects/${project.id}`} className="button-secondary">
-            Project
-          </Link>
-          <Link href={`/projects/${project.id}/packages/${projectPackage.id}/edit`} className="button-secondary">
-            Edit package
-          </Link>
-          <Link href={`/projects/${project.id}/packages/${projectPackage.id}/applicability`} className="button-secondary">
-            Applicability review
-          </Link>
-          <Link
-            href={`/projects/${project.id}/actions?packageId=${encodeURIComponent(projectPackage.id)}`}
+        <div className="flex flex-wrap gap-3">
+          <Link href="/projects" className="button-secondary">All projects</Link>
+          {projectRole ? (
+            <Link href={`/projects/${project.id}`} className="button-secondary">
+              Current project
+            </Link>
+          ) : null}
+          {canEditOverview ? (
+            <Link href={`/projects/${project.id}/packages/${projectPackage.id}/edit`} className="button-secondary">
+              Edit package
+            </Link>
+          ) : null}
+          {canReadDeliverables ? (
+            <Link href={`/projects/${project.id}/packages/${projectPackage.id}/applicability`} className="button-secondary">
+              Applicability review
+            </Link>
+          ) : null}
+          {canReadActions ? <Link
+            href={`/projects/${project.id}/packages/${projectPackage.id}/actions`}
             className="button-secondary"
           >
             Actions
-          </Link>
-          <DeleteConfirmation
+          </Link> : null}
+          {canManageAccess ? (
+            <Link
+              href={`/projects/${project.id}/packages/${projectPackage.id}/access`}
+              className="button-secondary"
+            >
+              Access Management
+            </Link>
+          ) : null}
+          {canDeletePackage ? <DeleteConfirmation
             action={deleteAction}
             buttonLabel="Delete package"
             confirmLabel="Delete Package"
             message={`Are you sure you want to delete package ${projectPackage.packageCode} - ${projectPackage.packageName}?`}
             title="Delete package"
-          />
+          /> : null}
         </div>
       </div>
 
@@ -80,10 +94,10 @@ export default async function PackageDetailPage({
           This Package cannot be deleted while Actions remain associated with it. Review the
           {" "}
           <Link
-            href={`/projects/${project.id}/actions?packageId=${encodeURIComponent(projectPackage.id)}`}
+            href={`/projects/${project.id}/packages/${projectPackage.id}/actions`}
             className="font-semibold underline"
           >
-            filtered Project Action Register
+            Package Action Register
           </Link>
           .
         </section>
@@ -106,14 +120,7 @@ export default async function PackageDetailPage({
           </div>
           <div className="flex flex-wrap items-center gap-3">
             <span className="status-pill status-not_assessed">{packageStageLabels[projectPackage.currentStage]}</span>
-            {previousStage && returnAction ? (
-              <form action={returnAction}>
-                <button type="submit" className="button-secondary">
-                  Return to {packageStageLabels[previousStage]}
-                </button>
-              </form>
-            ) : null}
-            {currentGate ? (
+            {currentGate && canReadGateReviews ? (
               <Link
                 href={`/projects/${project.id}/packages/${projectPackage.id}/gates/${encodeURIComponent(currentGate.id)}`}
                 className="button-primary"
@@ -126,7 +133,7 @@ export default async function PackageDetailPage({
         <div className="mt-5">
           <LifecycleProgress
             stages={lifecycle}
-            gates={projectPackage.gates}
+            gates={canReadGateReviews ? projectPackage.gates : []}
             gatePath={`/projects/${project.id}/packages/${projectPackage.id}/gates`}
             currentStageId={projectPackage.currentStage}
           />

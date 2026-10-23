@@ -1,8 +1,8 @@
 {
-  "version": 4,
+  "version": 6,
   "normalizer": {
     "path": "src/lib/gates.ts",
-    "sha256": "48adf305bed8784a2c64e667f48aaf3466baa5286b6f410ac387c13d8e455044"
+    "sha256": "0883ea0f7cbb16259226ea923664af956a1b7eba6f1399f649f1b6452a4ad343"
   },
   "templates": {
     "path": "src/lib/governance-templates.ts",

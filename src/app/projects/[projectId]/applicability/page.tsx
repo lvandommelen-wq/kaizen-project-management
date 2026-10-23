@@ -23,6 +23,7 @@ export default async function ProjectApplicabilityPage({ params, searchParams }:
   return (
     <ApplicabilityReview
       backHref={`/projects/${projectId}`}
+      backLabel="Current project"
       canEdit={access.role !== "viewer" && !review.methodologyAwaitingApproval}
       changes={review.changes}
       scopeLabel={`${review.project.projectNumber} - ${review.project.name}`}

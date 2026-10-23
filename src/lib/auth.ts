@@ -10,9 +10,14 @@ import {
   isAutomaticUserCreationAllowed,
   isPilotIdentityAllowed,
 } from "./pilot-policy";
+import { normalizeEmailAddress, readMicrosoftClaims } from "./microsoft-identity";
 
 export const userStatuses = ["invited", "active", "disabled"] as const;
-export const userAccessClasses = ["internal", "external_reviewer"] as const;
+export const userAccessClasses = [
+  "internal",
+  "external_reviewer",
+  "external_collaborator",
+] as const;
 
 export type UserStatus = (typeof userStatuses)[number];
 export type UserAccessClass = (typeof userAccessClasses)[number];
@@ -103,12 +108,9 @@ function createAuth(environment: AuthEnvironment, pool: Pool) {
         scope: ["openid", "profile", "email"],
         mapProfileToUser(profile) {
           const claims = readMicrosoftClaims(profile, environment.tenantId);
-          if (!claims.email) {
-            throw new Error("The Microsoft account did not provide an email address.");
-          }
-
           return {
-            normalizedEmail: normalizeEmail(claims.email),
+            email: claims.email,
+            normalizedEmail: claims.email,
           };
         },
       },
@@ -239,7 +241,7 @@ function createAuth(environment: AuthEnvironment, pool: Pool) {
             return {
               data: {
                 ...user,
-                normalizedEmail: normalizeEmail(user.email),
+                normalizedEmail: normalizeEmailAddress(user.email),
                 organizationId: null,
                 status: "active",
                 accessClass: "external_reviewer",
@@ -310,12 +312,14 @@ function createAuth(environment: AuthEnvironment, pool: Pool) {
           async before(session) {
             const result = await pool.query<{
               status: string;
+              access_class: UserAccessClass;
               provider_object_id: string;
               provider_subject: string;
               provider_email_snapshot: string | null;
               entra_account_type: number;
             }>(
               `SELECT app_user.status,
+                      app_user.access_class,
                       user_identity.provider_object_id,
                       user_identity.provider_subject,
                       user_identity.provider_email_snapshot,
@@ -346,14 +350,16 @@ function createAuth(environment: AuthEnvironment, pool: Pool) {
 
             const accessClass: UserAccessClass = identity.entra_account_type === 0
               ? "internal"
-              : "external_reviewer";
+              : identity.access_class === "external_collaborator"
+                ? "external_collaborator"
+                : "external_reviewer";
             const updateResult = await pool.query(
               `UPDATE app_user
                SET access_class = $1,
                    normalized_email = $2,
                    updated_at = $3
                WHERE id = $4`,
-              [accessClass, normalizeEmail(email), new Date(), session.userId],
+              [accessClass, normalizeEmailAddress(email), new Date(), session.userId],
             );
 
             return updateResult.rowCount === 1;
@@ -398,34 +404,6 @@ function requireAuthEnvironment(): AuthEnvironment {
     secret: process.env.BETTER_AUTH_SECRET!.trim(),
     tenantId: process.env.MICROSOFT_TENANT_ID!.trim().toLowerCase(),
   };
-}
-
-function readMicrosoftClaims(
-  profile: Record<string, unknown>,
-  expectedTenantId: string,
-  expectedObjectId?: string,
-) {
-  const tenantId = typeof profile.tid === "string" ? profile.tid.toLowerCase() : "";
-  const objectId = typeof profile.oid === "string" ? profile.oid.toLowerCase() : "";
-  const subject = typeof profile.sub === "string" ? profile.sub : "";
-  const email = typeof profile.email === "string" ? profile.email.trim() : null;
-  const accountType = profile.acct === 0 ? 0 : 1;
-
-  if (tenantId !== expectedTenantId.toLowerCase()) {
-    throw new Error("The Microsoft identity was issued by an unexpected tenant.");
-  }
-  if (!isUuid(objectId) || (expectedObjectId && objectId !== expectedObjectId.toLowerCase())) {
-    throw new Error("The Microsoft identity does not contain the expected object ID.");
-  }
-  if (!subject) {
-    throw new Error("The Microsoft identity does not contain a provider subject.");
-  }
-
-  return { tenantId, objectId, subject, email, accountType };
-}
-
-function normalizeEmail(email: string) {
-  return email.trim().toLowerCase();
 }
 
 function isHttpUrl(value: string) {

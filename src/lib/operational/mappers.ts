@@ -2,16 +2,17 @@ import "server-only";
 
 import type { PoolClient } from "pg";
 import type { Deliverable } from "../deliverables";
-import type {
-  Gate,
-  GateReviewActorSnapshot,
-  GateReviewApproverResponse,
-  GateReviewCycle,
-  GateReviewFrozenEvidence,
-  GateReviewGateSnapshot,
-  GateReviewInvitationAttemptStatus,
-  GateReviewPackageSnapshot,
-  GateReviewProjectSnapshot,
+import {
+  deriveStageDeliverableProtection,
+  type Gate,
+  type GateReviewActorSnapshot,
+  type GateReviewApproverResponse,
+  type GateReviewCycle,
+  type GateReviewFrozenEvidence,
+  type GateReviewGateSnapshot,
+  type GateReviewInvitationAttemptStatus,
+  type GateReviewPackageSnapshot,
+  type GateReviewProjectSnapshot,
 } from "../gates";
 import type { ProjectPackage } from "../packages";
 import type {
@@ -210,23 +211,21 @@ export async function loadGate(
   packageId: string | null,
   gateId: string,
 ): Promise<Gate | null> {
-  const gates = await loadGates(client, projectId, packageId, gateId);
-  return gates[0] ?? null;
+  const gates = await loadGates(client, projectId, packageId);
+  return gates.find((gate) => gate.id === gateId) ?? null;
 }
 
 async function loadGates(
   client: PoolClient,
   projectId: string,
   packageId: string | null,
-  gateId?: string,
 ): Promise<Gate[]> {
   const gateResult = await client.query(
     `SELECT * FROM gate
      WHERE project_id = $1
        AND package_id IS NOT DISTINCT FROM $2::text
-       AND ($3::text IS NULL OR id = $3)
-     ORDER BY sequence, id`,
-    [projectId, packageId, gateId ?? null],
+      ORDER BY sequence, id`,
+    [projectId, packageId],
   );
   const gateRows = rows(gateResult);
   const gateIds = gateRows.map((row) => text(row.id));
@@ -296,14 +295,26 @@ async function loadGates(
   const attempts = rows(attemptResult);
   const reworkActions = rows(reworkResult);
 
-  return gateRows.map((gateRow) => {
+  return gateRows.map((gateRow, gateIndex) => {
     const id = text(gateRow.id);
+    const previousGate = gateRows[gateIndex - 1];
+    const protection = deriveStageDeliverableProtection(
+      {
+        status: text(gateRow.status) as Gate["status"],
+        reapprovalRequired: gateRow.reapproval_required === true,
+      },
+      previousGate
+        ? { status: text(previousGate.status) as Gate["status"] }
+        : null,
+    );
     return {
       id,
       templateVersion: integer(gateRow.template_version),
       name: text(gateRow.name),
       stageId: text(gateRow.stage_id),
       status: text(gateRow.status) as Gate["status"],
+      reapprovalRequired: gateRow.reapproval_required === true,
+      ...protection,
       approvers: approvers
         .filter((row) => row.gate_id === id)
         .map((row) => ({
@@ -500,6 +511,43 @@ export async function loadProjectActions(
        AND ($2::boolean OR project.archived_at IS NULL)
      ORDER BY action.sequence, action.id`,
     [projectId, includeArchivedProject],
+  );
+  return mapActions(client, rows(result));
+}
+
+export async function loadAuthorizedProjectActions(
+  client: PoolClient,
+  projectId: string,
+  input: {
+    allowOverall: boolean;
+    packageIds: string[];
+    actionId?: string;
+  },
+): Promise<ProjectAction[]> {
+  const result = await client.query(
+    `SELECT action.*, action.due_date::text AS due_date
+     FROM project_action AS action
+     JOIN project ON project.id = action.project_id
+     WHERE action.project_id = $1
+       AND project.archived_at IS NULL
+       AND ($4::text IS NULL OR action.id = $4)
+       AND (
+         ($2::boolean AND NOT EXISTS (
+           SELECT 1 FROM project_action_package AS overall_link
+           WHERE overall_link.action_id = action.id
+         ))
+         OR (
+           (SELECT count(*) FROM project_action_package AS scope_count
+            WHERE scope_count.action_id = action.id) = 1
+           AND EXISTS (
+             SELECT 1 FROM project_action_package AS permitted_link
+             WHERE permitted_link.action_id = action.id
+               AND permitted_link.package_id = ANY($3::text[])
+           )
+         )
+       )
+     ORDER BY action.sequence, action.id`,
+    [projectId, input.allowOverall, input.packageIds, input.actionId ?? null],
   );
   return mapActions(client, rows(result));
 }

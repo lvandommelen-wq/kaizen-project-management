@@ -16,6 +16,8 @@ type ReviewGate = {
     name: string;
     stageId: string;
     status: string;
+    deliverableConfigurationLocked: boolean;
+    deliverableCompletionLocked: boolean;
   };
   stageLabel: string;
   deliverables: Deliverable[];
@@ -23,6 +25,7 @@ type ReviewGate = {
 
 export function ApplicabilityReview({
   backHref,
+  backLabel,
   canEdit,
   changes,
   createAction,
@@ -39,6 +42,7 @@ export function ApplicabilityReview({
   gateHref,
 }: {
   backHref: string;
+  backLabel: string;
   canEdit: boolean;
   changes: ApplicabilityChange[];
   createAction: (gateId: string, itemType: ApplicabilityItemType) => FormAction;
@@ -81,7 +85,7 @@ export function ApplicabilityReview({
             </p>
           ) : null}
         </div>
-        <Link href={backHref} className="button-secondary">Back</Link>
+        <Link href={backHref} className="button-secondary">{backLabel}</Link>
       </div>
 
       <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -95,7 +99,8 @@ export function ApplicabilityReview({
         </div>
         {methodologyApproved ? (
           <p className="mt-3 border-t border-slate-200 pt-3 text-sm text-slate-700">
-            This methodology has formal approval. Subsequent applicability changes are recorded and leave the approved snapshot unchanged.
+            This methodology has formal approval. Protected submitted or approved Stages are read-only; permitted
+            changes to unprotected future Stages are recorded and leave approved snapshots unchanged.
           </p>
         ) : null}
         {methodologyAwaitingApproval ? (
@@ -134,6 +139,7 @@ export function ApplicabilityReview({
 
       {visibleGates.map(({ gate, stageLabel, deliverables }) => {
         const visibleDeliverables = deliverables.filter((item) => filter === "all" || item.applicability === filter);
+        const canEditStageConfiguration = canEdit && !gate.deliverableConfigurationLocked;
         if (visibleDeliverables.length === 0) return null;
         return (
           <section key={gate.id} className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
@@ -143,19 +149,36 @@ export function ApplicabilityReview({
                 <h2 className="mt-1 text-lg font-semibold text-slate-950">{gate.name}</h2>
               </div>
               <Link href={gateHref(gate.id)} className="button-secondary">
-                Edit Stage Deliverables
+                {canEditStageConfiguration ? "Edit Stage Deliverables" : "View Stage Deliverables"}
               </Link>
             </header>
+            {gate.deliverableCompletionLocked ? (
+              <p className="border-b border-blue-200 bg-blue-50 px-5 py-3 text-sm text-blue-900">
+                This Stage&apos;s Deliverable configuration and completion evidence are protected by its
+                submitted or approved Gate. {gate.status === "submitted_for_approval"
+                  ? "Withdraw or return the Review Cycle before revising this Stage."
+                  : "Formally reopen this Gate before revising this Stage."}
+              </p>
+            ) : gate.deliverableConfigurationLocked ? (
+              <p className="border-b border-blue-200 bg-blue-50 px-5 py-3 text-sm text-blue-900">
+                This active Stage&apos;s configuration is protected by the preceding approved or submitted Gate.
+                Applicability, justification, titles and composition are read-only; execution completion remains editable.
+              </p>
+            ) : null}
             <ItemSection
               title="Deliverables"
-              items={visibleDeliverables.map((item) => ({ ...item, completion: item.status.replaceAll("_", " ") }))}
+              items={visibleDeliverables.map((item) => ({
+                ...item,
+                completion: item.status.replaceAll("_", " "),
+                completionStatus: item.status,
+              }))}
               itemType="deliverable"
-              canEdit={canEdit}
+              canEdit={canEditStageConfiguration}
               updateAction={updateAction}
               deleteAction={deleteAction}
               changes={changes}
             />
-            {canEdit ? (
+            {canEditStageConfiguration ? (
               <div className="border-t border-slate-200 bg-slate-50 p-4">
                 <AddItemForm action={createAction(gate.id, "deliverable")} itemType="deliverable" />
               </div>
@@ -173,6 +196,7 @@ type DisplayItem = {
   templateId: string | null;
   title: string;
   completion: string;
+  completionStatus: Deliverable["status"];
   applicability: Applicability;
   applicabilityJustification: string | null;
   applicabilityLocked: boolean;
@@ -190,20 +214,27 @@ function ItemSection({ title, items, itemType, canEdit, updateAction, deleteActi
   return (
     <div className="border-b border-slate-100 p-5 last:border-b-0">
       <h3 className="text-sm font-semibold text-slate-900">{title}</h3>
-      <div className="mt-3 divide-y divide-slate-100">
+      <div className="mt-3 space-y-3">
         {[...items]
           .sort((left, right) => applicabilityPriority(left.applicability) - applicabilityPriority(right.applicability))
           .map((item) => {
           const itemChanges = changes.filter((change) =>
             change.itemType === itemType && change.itemId === item.id);
           return (
-          <article key={item.id} className="py-4 first:pt-0 last:pb-0">
+          <article
+            key={item.id}
+            className={`rounded-lg border p-4 ${applicabilityItemClass(item)}`}
+          >
             <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(24rem,2fr)] xl:items-start">
               <div className="min-w-0">
                 <p className="font-medium text-slate-950">{item.title}</p>
                 <div className="mt-1 flex flex-wrap items-center gap-2">
                   <span className="status-pill status-not_assessed">{item.templateId ? "Default" : "Custom"}</span>
-                  <span className="text-xs text-slate-500">Completion: {item.completion}</span>
+                  <span className={`status-pill ${applicabilityItemStatusClass(item)}`}>
+                    {item.applicability === "not_applicable"
+                      ? applicabilityLabels.not_applicable
+                      : item.completion}
+                  </span>
                 </div>
               </div>
               <ApplicabilityDecisionForm
@@ -263,6 +294,22 @@ function AddItemForm({ action, itemType }: { action: FormAction; itemType: Appli
 
 function applicabilityPriority(value: Applicability) {
   return value === "not_applicable" ? 0 : 1;
+}
+
+function applicabilityItemClass(item: DisplayItem) {
+  if (item.applicability === "not_applicable") {
+    return "border-slate-300 bg-slate-100/80";
+  }
+  if (item.completionStatus === "completed") {
+    return "border-emerald-200 bg-emerald-50/50";
+  }
+  return "border-amber-200 bg-amber-50/70";
+}
+
+function applicabilityItemStatusClass(item: DisplayItem) {
+  if (item.applicability === "not_applicable") return "status-not_assessed";
+  if (item.completionStatus === "completed") return "status-green";
+  return "status-amber";
 }
 
 function filterHref(

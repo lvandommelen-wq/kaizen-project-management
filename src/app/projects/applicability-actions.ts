@@ -8,7 +8,10 @@ import {
   updateApplicabilityItem,
   type ApplicabilityItemType,
 } from "@/lib/applicability";
-import { withAuthorizedProjectMutation } from "@/lib/authorization";
+import { withAuthorizedAccessMutation } from "@/lib/access-authorization";
+import { requireInternalUser, withAuthorizedProjectMutation } from "@/lib/authorization";
+import type { AuditEventInput } from "@/lib/audit";
+import type { CurrentUser } from "@/lib/current-user";
 import { applicabilityValues, type Applicability } from "@/lib/gates";
 
 export async function updateApplicabilityItemAction(
@@ -23,9 +26,9 @@ export async function updateApplicabilityItemAction(
   if (!applicabilityValues.includes(applicability as Applicability)) {
     throw new Error("Select a valid applicability decision.");
   }
-  const result = await withAuthorizedProjectMutation({
+  const result = await withAuthorizedApplicabilityMutation({
     projectId,
-    minimumRole: "editor",
+    packageId,
     audit: {
       eventType: "applicability.updated",
       resourceType: "deliverable",
@@ -55,9 +58,9 @@ export async function createApplicabilityItemAction(
   itemType: ApplicabilityItemType,
   formData: FormData,
 ) {
-  const result = await withAuthorizedProjectMutation({
+  const result = await withAuthorizedApplicabilityMutation({
     projectId,
-    minimumRole: "editor",
+    packageId,
     audit: (itemId: string | null) => ({
       eventType: "applicability_item.created",
       resourceType: "deliverable",
@@ -84,9 +87,9 @@ export async function deleteApplicabilityItemAction(
   itemType: ApplicabilityItemType,
   itemId: string,
 ) {
-  const deleted = await withAuthorizedProjectMutation({
+  const deleted = await withAuthorizedApplicabilityMutation({
     projectId,
-    minimumRole: "editor",
+    packageId,
     audit: {
       eventType: "applicability_item.deleted",
       resourceType: "deliverable",
@@ -98,6 +101,31 @@ export async function deleteApplicabilityItemAction(
   if (!deleted) throw new Error("This custom item is protected by formal governance history and cannot be deleted.");
   revalidateApplicability(projectId, packageId);
   redirect(applicabilityPath(projectId, packageId));
+}
+
+async function withAuthorizedApplicabilityMutation<T>(input: {
+  projectId: string;
+  packageId: string | null;
+  audit: AuditEventInput | ((result: T) => AuditEventInput);
+  operation: (actor: CurrentUser) => Promise<T>;
+}) {
+  if (!input.packageId) {
+    return withAuthorizedProjectMutation({
+      projectId: input.projectId,
+      minimumRole: "editor",
+      audit: input.audit,
+      operation: input.operation,
+    });
+  }
+  const user = await requireInternalUser();
+  return withAuthorizedAccessMutation({
+    user,
+    projectId: input.projectId,
+    packageId: input.packageId,
+    module: "deliverables",
+    audit: input.audit,
+    operation: (_client, actor) => input.operation(actor),
+  });
 }
 
 function applicabilityPath(projectId: string, packageId: string | null) {
