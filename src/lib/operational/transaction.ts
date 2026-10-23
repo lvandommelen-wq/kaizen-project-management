@@ -36,10 +36,10 @@ export async function withOperationalTransaction<T>(
     await client.query(`SET LOCAL statement_timeout = ${statementTimeoutMs}`);
     const schema = await client.query(
       `SELECT 1 FROM identity_schema_migration
-       WHERE name = '007_project_authorization_audit.sql'`,
+       WHERE name = '010_gate_review_email_otp.sql'`,
     );
     if (schema.rowCount !== 1) {
-      throw new Error("Operational PostgreSQL migration 007 has not been applied.");
+      throw new Error("Operational PostgreSQL migration 010 has not been applied.");
     }
     const result = await transactionStorage.run(client, () => operation(client));
     await client.query("COMMIT");

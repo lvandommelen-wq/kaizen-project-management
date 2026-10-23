@@ -10,6 +10,7 @@ import {
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
+import type { CurrentUser } from "./current-user";
 import { getOperationalDataBackend } from "./operational/backend";
 import * as postgresOperational from "./operational/postgres";
 
@@ -102,8 +103,16 @@ export type ProjectActionUpdate = {
 export type GateDecisionReference = {
   id: string;
   gateId: string;
+  reviewCycleId?: string | null;
   decision: ProtectedGateDecision;
   recordedAt: string;
+  approvalSnapshot?: {
+    sequence: number;
+    description: string;
+    assignee: string;
+    dueDate: string | null;
+    status: ProjectActionStatus;
+  } | null;
 };
 
 export type ProjectAction = {
@@ -379,8 +388,22 @@ function isGateDecisionReference(value: unknown): value is GateDecisionReference
     isRecord(value) &&
       typeof value.id === "string" &&
       typeof value.gateId === "string" &&
+      (value.reviewCycleId === undefined ||
+        value.reviewCycleId === null ||
+        typeof value.reviewCycleId === "string") &&
       gateDecisionValues.includes(value.decision as ProtectedGateDecision) &&
-      typeof value.recordedAt === "string",
+      typeof value.recordedAt === "string" &&
+      (value.approvalSnapshot === undefined ||
+        value.approvalSnapshot === null ||
+        (isRecord(value.approvalSnapshot) &&
+          Number.isInteger(value.approvalSnapshot.sequence) &&
+          typeof value.approvalSnapshot.description === "string" &&
+          typeof value.approvalSnapshot.assignee === "string" &&
+          (value.approvalSnapshot.dueDate === null ||
+            typeof value.approvalSnapshot.dueDate === "string") &&
+          projectActionStatuses.includes(
+            value.approvalSnapshot.status as ProjectActionStatus,
+          ))),
   );
 }
 
@@ -1028,6 +1051,7 @@ export async function closeProjectAction(
   actionId: string,
   closedBy: ActionActor,
   comment: string | null,
+  reconciliationActor?: CurrentUser,
 ) {
   if (getOperationalDataBackend() === "postgres") {
     const action = await postgresOperational.closeProjectAction(
@@ -1035,6 +1059,7 @@ export async function closeProjectAction(
       actionId,
       closedBy,
       comment,
+      reconciliationActor,
     );
     if (!action) throw new Error("Action not found.");
     return action;
@@ -1070,6 +1095,7 @@ export async function reopenProjectAction(
   status: ReopenedProjectActionStatus,
   reopenedBy: ActionActor,
   comment: string | null,
+  reconciliationActor?: CurrentUser,
 ) {
   if (getOperationalDataBackend() === "postgres") {
     const action = await postgresOperational.reopenProjectAction(
@@ -1078,6 +1104,7 @@ export async function reopenProjectAction(
       status,
       reopenedBy,
       comment,
+      reconciliationActor,
     );
     if (!action) throw new Error("Action not found.");
     return action;

@@ -1,6 +1,10 @@
 import { readFile } from "node:fs/promises";
 import { Client } from "pg";
-import { canonicalJson, logicalFingerprint } from "./operational-data.mjs";
+import {
+  canonicalJson,
+  logicalFingerprint,
+  projectLegacyApplicability,
+} from "./operational-data.mjs";
 
 const TABLE_COLUMNS = {
   project: [
@@ -17,13 +21,19 @@ const TABLE_COLUMNS = {
   gate: [
     "id", "project_id", "package_id", "scope_level", "sequence", "template_version", "name", "stage_id", "status",
   ],
-  gate_criterion: ["id", "gate_id", "sequence", "template_id", "description", "status"],
+  gate_criterion: [
+    "id", "gate_id", "sequence", "template_id", "description", "status", "applicability",
+    "applicability_justification", "applicability_decided_at", "applicability_decided_by_user_id",
+    "applicability_decided_by_display_name", "applicability_origin", "applicability_locked",
+  ],
   gate_approver: [
     "id", "gate_id", "sequence", "name", "email", "role_function", "approval_role", "approval_level",
   ],
   deliverable: [
     "id", "template_id", "template_version", "project_id", "package_id", "gate_id", "sequence", "title",
-    "description", "status", "stage_id", "scope_level", "created_at", "updated_at",
+    "description", "status", "stage_id", "scope_level", "created_at", "updated_at", "applicability",
+    "applicability_justification", "applicability_decided_at", "applicability_decided_by_user_id",
+    "applicability_decided_by_display_name", "applicability_origin", "applicability_locked",
   ],
   deliverable_criterion: ["deliverable_id", "criterion_id", "gate_id", "sequence"],
   project_action_sequence: ["project_id", "next_sequence"],
@@ -61,7 +71,13 @@ const TABLE_COLUMNS = {
 };
 
 const INSERT_ORDER = Object.keys(TABLE_COLUMNS);
-export const OPERATIONAL_TABLES = [...INSERT_ORDER, "audit_event", "operational_import"];
+export const OPERATIONAL_TABLES = [
+  ...INSERT_ORDER,
+  "gate_review_otp_challenge",
+  "gate_review_session",
+  "audit_event",
+  "operational_import",
+];
 const JSON_COLUMNS = new Set([
   "project_action_update.changes",
   "gate_review_cycle.project_snapshot",
@@ -140,6 +156,10 @@ export async function loadOwnerMapping(filePath, projects) {
 
 export function buildRelationalRows(source, ownerRows = []) {
   const rows = Object.fromEntries(INSERT_ORDER.map((table) => [table, []]));
+  const gatesById = new Map([
+    ...source.projects.flatMap((project) => project.gates),
+    ...source.packages.flatMap((projectPackage) => projectPackage.gates),
+  ].map((gate) => [gate.id, gate]));
   rows.project_membership.push(...ownerRows);
 
   for (const project of source.projects) {
@@ -192,6 +212,12 @@ export function buildRelationalRows(source, ownerRows = []) {
   const deliverableSequence = new Map();
   for (const deliverable of source.deliverables) {
     const sequence = nextSequence(deliverableSequence, deliverable.gateId);
+    const applicability = projectLegacyApplicability({
+      item: deliverable,
+      itemId: deliverable.id,
+      itemType: "deliverable",
+      gate: gatesById.get(deliverable.gateId),
+    });
     rows.deliverable.push({
       id: deliverable.id,
       template_id: deliverable.templateId,
@@ -202,11 +228,18 @@ export function buildRelationalRows(source, ownerRows = []) {
       sequence,
       title: deliverable.title,
       description: deliverable.description,
-      status: deliverable.status,
+      status: deliverable.status === "not_applicable" ? "not_started" : deliverable.status,
       stage_id: deliverable.stageId,
       scope_level: deliverable.scopeLevel,
       created_at: deliverable.createdAt,
       updated_at: deliverable.updatedAt,
+      applicability,
+      applicability_justification: deliverable.applicabilityJustification ?? null,
+      applicability_decided_at: deliverable.applicabilityDecidedAt ?? null,
+      applicability_decided_by_user_id: deliverable.applicabilityDecidedByUserId ?? null,
+      applicability_decided_by_display_name: deliverable.applicabilityDecidedByDisplayName ?? null,
+      applicability_origin: deliverable.applicabilityOrigin ?? "legacy",
+      applicability_locked: deliverable.applicabilityLocked ?? false,
     });
     deliverable.criterionIds.forEach((criterionId, index) =>
       rows.deliverable_criterion.push({
@@ -305,7 +338,7 @@ export async function importOperationalRows({
            started_at,
            completed_at,
            result
-         ) VALUES (7, $1, $2, $3, $4, $5, $6, $7, $8, 'pass')`,
+         ) VALUES (8, $1, $2, $3, $4, $5, $6, $7, $8, 'pass')`,
         [
           importRecord.sourceCommit,
           importRecord.sourceWorktreeDirty,
@@ -363,7 +396,7 @@ export async function validateImportedRows({
     const expectedFingerprint = logicalFingerprint(expectedRows);
     if (
       importRows.rowCount !== 1 ||
-      importRows.rows[0].migration_version !== 7 ||
+      importRows.rows[0].migration_version !== 8 ||
       importRows.rows[0].result !== "pass" ||
       importRows.rows[0].logical_fingerprint !== expectedFingerprint
     ) {
@@ -417,14 +450,29 @@ function addGates(rows, gates, projectId, packageId, scopeLevel) {
       stage_id: gate.stageId,
       status: gate.status,
     });
-    gate.criteria.forEach((criterion, index) => rows.gate_criterion.push({
-      id: criterion.id,
-      gate_id: gate.id,
-      sequence: index + 1,
-      template_id: criterion.templateId,
-      description: criterion.description,
-      status: criterion.status,
-    }));
+    gate.criteria.forEach((criterion, index) => {
+      const applicability = projectLegacyApplicability({
+        item: criterion,
+        itemId: criterion.id,
+        itemType: "criterion",
+        gate,
+      });
+      rows.gate_criterion.push({
+        id: criterion.id,
+        gate_id: gate.id,
+        sequence: index + 1,
+        template_id: criterion.templateId,
+        description: criterion.description,
+        status: criterion.status === "not_applicable" ? "pending" : criterion.status,
+        applicability,
+        applicability_justification: criterion.applicabilityJustification ?? null,
+        applicability_decided_at: criterion.applicabilityDecidedAt ?? null,
+        applicability_decided_by_user_id: criterion.applicabilityDecidedByUserId ?? null,
+        applicability_decided_by_display_name: criterion.applicabilityDecidedByDisplayName ?? null,
+        applicability_origin: criterion.applicabilityOrigin ?? "legacy",
+        applicability_locked: criterion.applicabilityLocked ?? false,
+      });
+    });
     gate.approvers.forEach((approver, index) => rows.gate_approver.push({
       id: approver.id,
       gate_id: gate.id,
@@ -438,6 +486,7 @@ function addGates(rows, gates, projectId, packageId, scopeLevel) {
     gate.reviewCycles.forEach((cycle) => addReviewCycle(rows, cycle, gate.id));
   });
 }
+
 
 function addReviewCycle(rows, cycle, gateId) {
   rows.gate_review_cycle.push({
@@ -528,12 +577,23 @@ async function assertOperationalSchema(client) {
      FROM identity_schema_migration
       WHERE name IN (
         '004_operational_data_foundation.sql',
-        '005_protect_gate_review_attempt_history.sql',
-         '007_project_authorization_audit.sql'
-      )`,
+         '005_protect_gate_review_attempt_history.sql',
+         '007_project_authorization_audit.sql',
+         '008_stage_gate_applicability.sql',
+          '009_gate_approver_identity_management.sql',
+          '010_gate_review_email_otp.sql',
+          '011_binary_applicability.sql',
+          '012_rename_project_applicability_matrix_deliverable.sql',
+           '013_package_applicability_matrix_deliverable.sql',
+           '014_gate_action_status_reconciliation.sql',
+           '015_deliverables_only_methodology.sql',
+           '016_remove_obsolete_procurement_teco.sql',
+           '017_gate_matrix_review_confirmation.sql',
+           '018_add_project_site_organization_ehs_plan.sql'
+         )`,
   );
-  if (result.rowCount !== 3) {
-    throw new Error("Operational migrations 004, 005, and 007 have not all been applied to the target database.");
+  if (result.rowCount !== 14) {
+    throw new Error("Operational migrations 004, 005, and 007 through 018 have not all been applied to the target database.");
   }
 }
 

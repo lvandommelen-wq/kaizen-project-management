@@ -56,6 +56,9 @@ export default async function PackageDetailPage({
           <Link href={`/projects/${project.id}/packages/${projectPackage.id}/edit`} className="button-secondary">
             Edit package
           </Link>
+          <Link href={`/projects/${project.id}/packages/${projectPackage.id}/applicability`} className="button-secondary">
+            Applicability review
+          </Link>
           <Link
             href={`/projects/${project.id}/actions?packageId=${encodeURIComponent(projectPackage.id)}`}
             className="button-secondary"

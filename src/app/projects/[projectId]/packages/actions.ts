@@ -30,7 +30,7 @@ export async function createPackageAction(projectId: string, formData: FormData)
     notFound();
   }
 
-  await withAuthorizedProjectMutation({
+  const projectPackage = await withAuthorizedProjectMutation({
     projectId,
     minimumRole: "editor",
     audit: (projectPackage) => ({
@@ -41,9 +41,11 @@ export async function createPackageAction(projectId: string, formData: FormData)
     operation: () => createPackage(projectId, parsePackageFormData(formData)),
   });
 
+  if (!projectPackage) notFound();
+
   revalidatePath("/projects");
   revalidatePath(`/projects/${projectId}`);
-  redirect(`/projects/${projectId}`);
+  redirect(`/projects/${projectId}/packages/${projectPackage.id}/applicability`);
 }
 
 export async function updatePackageAction(projectId: string, packageId: string, formData: FormData) {

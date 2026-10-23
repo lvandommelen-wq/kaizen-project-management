@@ -82,8 +82,8 @@ export async function loadOperationalSource({
   validateProjectionManifest(projectionManifest);
   await verifyProjectionSourceFiles(projectionManifest);
 
-  const projection = await projectRuntimeState(raw);
-  if (projection.changes.scalarChanges.length || projection.changes.addedCriteria.length) {
+  const projection = await projectRuntimeState(raw, projectionManifest.retainedLegacyCriteria);
+  if (projection.changes.scalarChanges.length) {
     if (!allowRuntimeProjection) {
       throw new Error(
         "The source requires the approved runtime projection. Re-run with --allow-runtime-projection after reviewing the projection manifest.",
@@ -93,17 +93,18 @@ export async function loadOperationalSource({
       projection.changes,
       {
         scalarChanges: [...projectionManifest.scalarChanges].sort(compareProjectionChanges),
-        addedCriteria: [...projectionManifest.addedCriteria].sort((left, right) =>
+        retainedLegacyCriteria: [...projectionManifest.retainedLegacyCriteria].sort((left, right) =>
           left.criterion.id.localeCompare(right.criterion.id)),
       },
       "Runtime projection differs from the approved projection manifest",
     );
   }
 
-  const allowedMissingCriteria = new Set(
-    projectionManifest.addedCriteria.map((item) => item.criterion.id),
-  );
-  const rawValidation = validateRelationships(raw, { allowedMissingCriteria });
+  const rawValidation = validateRelationships(raw, {
+    allowedMissingLegacyCriteria: new Set(
+      projectionManifest.retainedLegacyCriteria.map((item) => item.criterion.id),
+    ),
+  });
   const projectedValidation = validateRelationships(projection.data);
 
   return {
@@ -119,7 +120,7 @@ export async function loadOperationalSource({
       templates: projectionManifest.templates,
       changes: projection.changes,
       summary: {
-        addedCriteria: projection.changes.addedCriteria.length,
+        retainedLegacyCriteria: projection.changes.retainedLegacyCriteria.length,
         templateVersionUpdates: projection.changes.scalarChanges.filter(
           (change) => change.field === "templateVersion",
         ).length,
@@ -149,7 +150,7 @@ export async function loadOperationalSource({
       {
         name: "deliverable-references",
         status: "pass",
-        details: "All projected Deliverable Gate and Criterion relationships resolve.",
+        details: "All projected Deliverable Gate relationships and retained legacy Criterion links resolve.",
       },
     ],
   };
@@ -181,7 +182,7 @@ export function validateSourceStructure(source) {
   }
 }
 
-export function validateRelationships(source, { allowedMissingCriteria = new Set() } = {}) {
+export function validateRelationships(source, { allowedMissingLegacyCriteria = new Set() } = {}) {
   const errors = [];
   const projects = source.projects;
   const packages = source.packages;
@@ -309,8 +310,8 @@ export function validateRelationships(source, { allowedMissingCriteria = new Set
     for (const criterionId of deliverable.criterionIds) {
       const criterion = criteria.get(criterionId);
       if (!criterion) {
-        if (!allowedMissingCriteria.has(criterionId)) {
-          errors.push(`Deliverable ${deliverable.id} references missing Criterion ${criterionId}.`);
+        if (!allowedMissingLegacyCriteria.has(criterionId)) {
+          errors.push(`Deliverable ${deliverable.id} references missing legacy Criterion ${criterionId}.`);
         }
       } else if (criterion.gateId !== deliverable.gateId) {
         errors.push(`Deliverable ${deliverable.id} references a Criterion from another Gate.`);
@@ -368,11 +369,13 @@ export function validateRelationships(source, { allowedMissingCriteria = new Set
 
   return [
     {
-      name: allowedMissingCriteria.size ? "raw-source-relationships" : "projected-source-relationships",
+      name: allowedMissingLegacyCriteria.size
+        ? "raw-source-relationships"
+        : "projected-source-relationships",
       status: "pass",
-      details: allowedMissingCriteria.size
-        ? `${allowedMissingCriteria.size} approved runtime-derived Criterion references were recognized.`
-        : "All mutable operational references resolve.",
+      details: allowedMissingLegacyCriteria.size
+        ? `${allowedMissingLegacyCriteria.size} approved legacy Criterion references are restored only in the import projection.`
+        : "All mutable operational references and retained legacy Criterion links resolve.",
     },
   ];
 }
@@ -491,14 +494,12 @@ export function sanitizeError(error) {
     .replace(/re_[A-Za-z0-9_-]+/g, "[REDACTED_API_KEY]");
 }
 
-async function projectRuntimeState(raw) {
+export async function projectRuntimeState(raw, retainedLegacyCriteria = []) {
   const [{ normalizeGates }, templates] = await Promise.all([
     import(pathToFileURL(path.join(process.cwd(), "src", "lib", "gates.ts")).href),
     import(pathToFileURL(path.join(process.cwd(), "src", "lib", "governance-templates.ts")).href),
   ]);
   const scalarChanges = [];
-  const addedCriteria = [];
-
   const projects = raw.projects.map((project) => ({
     ...project,
     gates: projectGates(
@@ -518,6 +519,27 @@ async function projectRuntimeState(raw) {
     ),
   }));
 
+  const projectedGates = new Map([
+    ...projects.flatMap((project) => project.gates),
+    ...packages.flatMap((projectPackage) => projectPackage.gates),
+  ].map((gate) => [gate.id, gate]));
+  for (const retained of retainedLegacyCriteria) {
+    const gate = projectedGates.get(retained.gateId);
+    if (!gate) throw new Error(`Retained legacy Criterion references missing Gate ${retained.gateId}.`);
+    if (!gate.criteria.some((criterion) => criterion.id === retained.criterion.id)) {
+      gate.criteria.push({
+        ...retained.criterion,
+        applicability: "applicable",
+        applicabilityJustification: null,
+        applicabilityDecidedAt: null,
+        applicabilityDecidedByUserId: null,
+        applicabilityDecidedByDisplayName: null,
+        applicabilityOrigin: "legacy",
+        applicabilityLocked: false,
+      });
+    }
+  }
+
   function projectGates(scope, scopeId, persistedGates, normalizedGates) {
     return normalizedGates.map((normalized) => {
       const persisted = persistedGates.find(
@@ -527,13 +549,21 @@ async function projectRuntimeState(raw) {
         throw new Error(`Runtime projection attempted to add unexpected Gate ${normalized.id}.`);
       }
 
+      const canSynchronizeTemplate = ["not_submitted", "returned_for_rework"].includes(persisted.status);
+      const projected = canSynchronizeTemplate
+        ? normalized
+        : {
+            ...normalized,
+            templateVersion: persisted.templateVersion,
+            name: persisted.name,
+          };
       for (const field of ["id", "templateVersion", "name", "stageId", "status"]) {
-        if (persisted[field] !== normalized[field]) {
+        if (persisted[field] !== projected[field]) {
           scalarChanges.push({
-            gateId: normalized.id,
+            gateId: projected.id,
             field,
             from: persisted[field],
-            to: normalized[field],
+            to: projected[field],
           });
         }
       }
@@ -548,47 +578,87 @@ async function projectRuntimeState(raw) {
         `Runtime projection changed historical Review Cycles for Gate ${normalized.id}`,
       );
 
-      const persistedCriteria = new Map(persisted.criteria.map((criterion) => [criterion.id, criterion]));
-      const normalizedCriteria = new Map(normalized.criteria.map((criterion) => [criterion.id, criterion]));
-      for (const criterion of normalized.criteria) {
-        const existing = persistedCriteria.get(criterion.id);
-        if (!existing) {
-          addedCriteria.push({ gateId: normalized.id, criterion });
-        } else {
-          assertCanonicalEqual(
-            criterion,
-            existing,
-            `Runtime projection changed existing Criterion ${criterion.id}`,
-          );
-        }
-      }
-      for (const criterion of persisted.criteria) {
-        if (!normalizedCriteria.has(criterion.id)) {
-          throw new Error(`Runtime projection removed existing Criterion ${criterion.id}.`);
-        }
-      }
-
       return {
-        ...normalized,
+        ...projected,
+        // Retained only so legacy rows and links can be imported for historical recovery.
+        // Active application loaders intentionally return no Criteria.
+        criteria: persisted.criteria.map((criterion) => ({
+          ...criterion,
+          applicability: projectLegacyApplicability({
+            item: criterion,
+            itemId: criterion.id,
+            itemType: "criterion",
+            gate: persisted,
+          }),
+        })),
         reviewCycles: persisted.reviewCycles,
       };
     });
   }
 
+  const gatesById = new Map([
+    ...projects.flatMap((project) => project.gates),
+    ...packages.flatMap((projectPackage) => projectPackage.gates),
+  ].map((gate) => [gate.id, gate]));
+  const deliverables = raw.deliverables.map((deliverable) => ({
+    ...structuredClone(deliverable),
+    status: deliverable.status === "not_applicable" ? "not_started" : deliverable.status,
+    applicability: projectLegacyApplicability({
+      item: deliverable,
+      itemId: deliverable.id,
+      itemType: "deliverable",
+      gate: gatesById.get(deliverable.gateId),
+    }),
+    applicabilityJustification: deliverable.applicabilityJustification ?? null,
+    applicabilityDecidedAt: deliverable.applicabilityDecidedAt ?? null,
+    applicabilityDecidedByUserId: deliverable.applicabilityDecidedByUserId ?? null,
+    applicabilityDecidedByDisplayName: deliverable.applicabilityDecidedByDisplayName ?? null,
+    applicabilityOrigin: deliverable.applicabilityOrigin ?? "legacy",
+    applicabilityLocked: deliverable.applicabilityLocked ?? false,
+  }));
+
   return {
     data: {
       projects,
       packages,
-      deliverables: structuredClone(raw.deliverables),
+      deliverables,
       actionStore: structuredClone(raw.actionStore),
       legacyActionBackup: structuredClone(raw.legacyActionBackup),
     },
     changes: {
       scalarChanges: scalarChanges.sort(compareProjectionChanges),
-      addedCriteria: addedCriteria.sort((left, right) =>
+      retainedLegacyCriteria: [...retainedLegacyCriteria].sort((left, right) =>
         left.criterion.id.localeCompare(right.criterion.id)),
     },
   };
+}
+
+export function projectLegacyApplicability({ item, itemId, itemType, gate }) {
+  if (item.applicabilityLocked) return "applicable";
+  if (item.applicability === "not_applicable" || item.status === "not_applicable") {
+    return "not_applicable";
+  }
+  if (
+    item.templateId == null ||
+    item.status === "completed" ||
+    (itemType === "deliverable" && item.status === "in_progress")
+  ) {
+    return "applicable";
+  }
+
+  const evidenceKey = itemType === "criterion" ? "criteria" : "deliverables";
+  const idKey = itemType === "criterion" ? "criterionId" : "deliverableId";
+  const frozenItems = (gate?.reviewCycles ?? []).flatMap(
+    (cycle) => cycle.frozenEvidence?.[evidenceKey] ?? [],
+  ).filter((frozenItem) => frozenItem[idKey] === itemId);
+  if (frozenItems.some((frozenItem) => frozenItem.status !== "not_applicable")) {
+    return "applicable";
+  }
+  if (frozenItems.some((frozenItem) => frozenItem.status === "not_applicable")) {
+    return "not_applicable";
+  }
+
+  return "applicable";
 }
 
 async function verifyProjectionSourceFiles(manifest) {
@@ -613,7 +683,7 @@ function validateProjectionManifest(manifest) {
   requiredString(manifest.templates.path, "projection templates path");
   requiredString(manifest.templates.sha256, "projection templates checksum");
   assertArray(manifest.scalarChanges, "projection scalarChanges");
-  assertArray(manifest.addedCriteria, "projection addedCriteria");
+  assertArray(manifest.retainedLegacyCriteria, "projection retainedLegacyCriteria");
 }
 
 function validateProject(project, location) {
@@ -942,19 +1012,16 @@ function renderMarkdownReport(report) {
       "",
       "## Runtime Projection",
       "",
-      `- Added Criteria: ${report.projection.summary.addedCriteria}`,
       `- Template-version updates: ${report.projection.summary.templateVersionUpdates}`,
       `- Legacy-name updates: ${report.projection.summary.legacyNameUpdates}`,
+      `- Legacy Criteria restored for referential recovery: ${report.projection.summary.retainedLegacyCriteria}`,
+      "- Active Criteria projected: 0 (legacy rows are retained unchanged for recovery)",
       "",
       "### Derived Metadata",
       "",
       ...report.projection.changes.scalarChanges.map((change) =>
         `- \`${change.gateId}\` ${change.field}: \`${String(change.from)}\` -> \`${String(change.to)}\``),
       "",
-      "### Derived Criteria",
-      "",
-      ...report.projection.changes.addedCriteria.map((change) =>
-        `- \`${change.criterion.id}\` (${change.criterion.status})`),
     );
   }
   if (report.error) lines.push("", "## Error", "", report.error);

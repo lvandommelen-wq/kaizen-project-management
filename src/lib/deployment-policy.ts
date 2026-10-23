@@ -10,6 +10,9 @@ const requiredProductionVariables = [
   "MICROSOFT_CLIENT_SECRET",
   "MICROSOFT_TENANT_ID",
   "DATABASE_URL",
+  "RESEND_API_KEY",
+  "EMAIL_FROM",
+  "GATE_REVIEW_OTP_SECRET",
 ] as const;
 
 const prohibitedPublicVariables = [
@@ -18,6 +21,7 @@ const prohibitedPublicVariables = [
   "NEXT_PUBLIC_DATABASE_URL",
   "NEXT_PUBLIC_DATABASE_DIRECT_URL",
   "NEXT_PUBLIC_RESEND_API_KEY",
+  "NEXT_PUBLIC_GATE_REVIEW_OTP_SECRET",
 ] as const;
 
 export function getProductionConfigurationIssues(
@@ -42,6 +46,10 @@ export function getProductionConfigurationIssues(
   if (secret && secret.length < 32) {
     issues.push("BETTER_AUTH_SECRET must contain at least 32 characters.");
   }
+  const otpSecret = environment.GATE_REVIEW_OTP_SECRET?.trim();
+  if (otpSecret && otpSecret.length < 32) {
+    issues.push("GATE_REVIEW_OTP_SECRET must contain at least 32 characters.");
+  }
 
   const authUrl = productionBaseUrl(environment.BETTER_AUTH_URL, "BETTER_AUTH_URL", issues);
   const appUrl = productionBaseUrl(environment.APP_BASE_URL, "APP_BASE_URL", issues);
@@ -63,9 +71,6 @@ export function getProductionConfigurationIssues(
 
   validateRuntimeDatabaseUrl(environment.DATABASE_URL, issues);
 
-  if (environment.RESEND_API_KEY?.trim() || environment.EMAIL_FROM?.trim()) {
-    issues.push("RESEND_API_KEY and EMAIL_FROM must be absent during the Owner-only pilot.");
-  }
   for (const name of prohibitedPublicVariables) {
     if (environment[name]?.trim()) issues.push(`${name} must never be configured.`);
   }

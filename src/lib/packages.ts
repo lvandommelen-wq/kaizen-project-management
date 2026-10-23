@@ -4,7 +4,6 @@ import path from "node:path";
 import {
   ensureDefaultDeliverables,
   getGateDeliverables,
-  removeCriterionFromDeliverables,
 } from "./deliverables";
 import {
   claimGateReviewInvitationAttempt,
@@ -19,8 +18,6 @@ import {
   type Gate,
   type GateApprover,
   type GateApproverInput,
-  type GateCriterion,
-  type GateCriterionInput,
   type GateReviewResponseInput,
   type GateReviewActorSnapshot,
   type GateReviewResponseResult,
@@ -304,12 +301,16 @@ export async function withdrawPackageGateSubmission(
   projectId: string,
   packageId: string,
   gateId: string,
+  withdrawalReason: string,
+  withdrawnBy: GateReviewActorSnapshot,
 ): Promise<GateWithdrawalResult<ProjectPackage> | null> {
   if (getOperationalDataBackend() === "postgres") {
     return postgresOperational.withdrawPackageGateSubmission(
       projectId,
       packageId,
       gateId,
+      withdrawalReason,
+      withdrawnBy,
     );
   }
   return withGateWorkflowLock(async () => {
@@ -330,11 +331,8 @@ export async function withdrawPackageGateSubmission(
     const now = new Date().toISOString();
     const result = withdrawGateReviewCycle(gate, {
       withdrawnAt: now,
-      withdrawnBy: {
-        userId: null,
-        displayName: project.projectManager,
-        email: null,
-      },
+      withdrawnBy,
+      withdrawalReason,
     });
 
     if (result.outcome !== "withdrawn") {
@@ -617,10 +615,12 @@ export async function createPackageGateApprover(
     if (!projectPackage || !gate || !isGateInPreparation(gate)) {
       return null;
     }
-
     const approver: GateApprover = {
       id: randomUUID(),
       ...input,
+      assignedUserId: null,
+      expectedProviderTenantId: null,
+      expectedProviderObjectId: null,
     };
 
     gate.approvers.push(approver);
@@ -659,10 +659,12 @@ export async function updatePackageGateApprover(
     if (!projectPackage || !gate || !isGateInPreparation(gate) || approverIndex === -1) {
       return null;
     }
-
     const approver: GateApprover = {
       id: approverId,
       ...input,
+      assignedUserId: null,
+      expectedProviderTenantId: null,
+      expectedProviderObjectId: null,
     };
 
     gate.approvers[approverIndex] = approver;
@@ -703,143 +705,6 @@ export async function deletePackageGateApprover(
     gate.approvers.splice(approverIndex, 1);
     projectPackage.updatedAt = new Date().toISOString();
     await writePackagesFile(packages);
-    return true;
-  });
-}
-
-export async function createPackageGateCriterion(
-  projectId: string,
-  packageId: string,
-  gateId: string,
-  input: GateCriterionInput,
-) {
-  if (getOperationalDataBackend() === "postgres") {
-    return postgresOperational.createPackageGateCriterion(
-      projectId,
-      packageId,
-      gateId,
-      input,
-    );
-  }
-  return withGateWorkflowLock(async () => {
-    const packages = await readPackagesFile();
-    const packageIndex = packages.findIndex(
-      (projectPackage) => projectPackage.projectId === projectId && projectPackage.id === packageId,
-    );
-
-    if (packageIndex === -1) {
-      return null;
-    }
-
-    const gate = packages[packageIndex].gates.find((gate) => gate.id === gateId);
-
-    if (!gate || !isGateInPreparation(gate)) {
-      return null;
-    }
-
-    const criterion: GateCriterion = {
-      id: randomUUID(),
-      templateId: null,
-      ...input,
-    };
-
-    gate.criteria.push(criterion);
-    packages[packageIndex].updatedAt = new Date().toISOString();
-    await writePackagesFile(packages);
-    return criterion;
-  });
-}
-
-export async function updatePackageGateCriterion(
-  projectId: string,
-  packageId: string,
-  gateId: string,
-  criterionId: string,
-  input: GateCriterionInput,
-) {
-  if (getOperationalDataBackend() === "postgres") {
-    return postgresOperational.updatePackageGateCriterion(
-      projectId,
-      packageId,
-      gateId,
-      criterionId,
-      input,
-    );
-  }
-  return withGateWorkflowLock(async () => {
-    const packages = await readPackagesFile();
-    const packageIndex = packages.findIndex(
-      (projectPackage) => projectPackage.projectId === projectId && projectPackage.id === packageId,
-    );
-
-    if (packageIndex === -1) {
-      return null;
-    }
-
-    const gate = packages[packageIndex].gates.find((gate) => gate.id === gateId);
-    const criterionIndex = gate?.criteria.findIndex(
-      (criterion) => criterion.id === criterionId,
-    ) ?? -1;
-
-    if (!gate || !isGateInPreparation(gate) || criterionIndex === -1) {
-      return null;
-    }
-
-    const criterion: GateCriterion = {
-      id: criterionId,
-      templateId: gate.criteria[criterionIndex].templateId,
-      ...input,
-    };
-
-    gate.criteria[criterionIndex] = criterion;
-    packages[packageIndex].updatedAt = new Date().toISOString();
-    await writePackagesFile(packages);
-    return criterion;
-  });
-}
-
-export async function deletePackageGateCriterion(
-  projectId: string,
-  packageId: string,
-  gateId: string,
-  criterionId: string,
-) {
-  if (getOperationalDataBackend() === "postgres") {
-    return postgresOperational.deletePackageGateCriterion(
-      projectId,
-      packageId,
-      gateId,
-      criterionId,
-    );
-  }
-  return withGateWorkflowLock(async () => {
-    const packages = await readPackagesFile();
-    const packageIndex = packages.findIndex(
-      (projectPackage) => projectPackage.projectId === projectId && projectPackage.id === packageId,
-    );
-
-    if (packageIndex === -1) {
-      return false;
-    }
-
-    const gate = packages[packageIndex].gates.find((gate) => gate.id === gateId);
-    const criterionIndex = gate?.criteria.findIndex(
-      (criterion) => criterion.id === criterionId,
-    ) ?? -1;
-
-    if (
-      !gate ||
-      !isGateInPreparation(gate) ||
-      criterionIndex === -1 ||
-      gate.criteria[criterionIndex].templateId
-    ) {
-      return false;
-    }
-
-    gate.criteria.splice(criterionIndex, 1);
-    packages[packageIndex].updatedAt = new Date().toISOString();
-    await writePackagesFile(packages);
-    await removeCriterionFromDeliverables(criterionId);
     return true;
   });
 }

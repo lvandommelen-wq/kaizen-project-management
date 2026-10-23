@@ -4,7 +4,6 @@ import path from "node:path";
 import {
   ensureDefaultDeliverables,
   getGateDeliverables,
-  removeCriterionFromDeliverables,
 } from "./deliverables";
 import {
   claimGateReviewInvitationAttempt,
@@ -19,8 +18,6 @@ import {
   type Gate,
   type GateApprover,
   type GateApproverInput,
-  type GateCriterion,
-  type GateCriterionInput,
   type GateReviewResponseInput,
   type GateReviewActorSnapshot,
   type GateReviewResponseResult,
@@ -513,9 +510,16 @@ export async function submitProjectGateForApproval(
 export async function withdrawProjectGateSubmission(
   projectId: string,
   gateId: string,
+  withdrawalReason: string,
+  withdrawnBy: GateReviewActorSnapshot,
 ): Promise<GateWithdrawalResult<Project> | null> {
   if (getOperationalDataBackend() === "postgres") {
-    return postgresOperational.withdrawProjectGateSubmission(projectId, gateId);
+    return postgresOperational.withdrawProjectGateSubmission(
+      projectId,
+      gateId,
+      withdrawalReason,
+      withdrawnBy,
+    );
   }
   return withGateWorkflowLock(async () => {
     const projects = await readProjectsFile();
@@ -533,11 +537,8 @@ export async function withdrawProjectGateSubmission(
     const now = new Date().toISOString();
     const result = withdrawGateReviewCycle(gate, {
       withdrawnAt: now,
-      withdrawnBy: {
-        userId: null,
-        displayName: project.projectManager,
-        email: null,
-      },
+      withdrawnBy,
+      withdrawalReason,
     });
 
     if (result.outcome !== "withdrawn") {
@@ -800,10 +801,12 @@ export async function createProjectGateApprover(
     if (!project || !gate || !isGateInPreparation(gate)) {
       return null;
     }
-
     const approver: GateApprover = {
       id: randomUUID(),
       ...input,
+      assignedUserId: null,
+      expectedProviderTenantId: null,
+      expectedProviderObjectId: null,
     };
 
     gate.approvers.push(approver);
@@ -838,10 +841,12 @@ export async function updateProjectGateApprover(
     if (!project || !gate || !isGateInPreparation(gate) || approverIndex === -1) {
       return null;
     }
-
     const approver: GateApprover = {
       id: approverId,
       ...input,
+      assignedUserId: null,
+      expectedProviderTenantId: null,
+      expectedProviderObjectId: null,
     };
 
     gate.approvers[approverIndex] = approver;
@@ -878,123 +883,6 @@ export async function deleteProjectGateApprover(
     gate.approvers.splice(approverIndex, 1);
     project.updatedAt = new Date().toISOString();
     await writeProjectsFile(projects);
-    return true;
-  });
-}
-
-export async function createProjectGateCriterion(
-  projectId: string,
-  gateId: string,
-  input: GateCriterionInput,
-) {
-  if (getOperationalDataBackend() === "postgres") {
-    return postgresOperational.createProjectGateCriterion(projectId, gateId, input);
-  }
-  return withGateWorkflowLock(async () => {
-    const projects = await readProjectsFile();
-    const projectIndex = projects.findIndex((project) => project.id === projectId);
-
-    if (projectIndex === -1) {
-      return null;
-    }
-
-    const gate = projects[projectIndex].gates.find((gate) => gate.id === gateId);
-
-    if (!gate || !isGateInPreparation(gate)) {
-      return null;
-    }
-
-    const criterion: GateCriterion = {
-      id: randomUUID(),
-      templateId: null,
-      ...input,
-    };
-
-    gate.criteria.push(criterion);
-    projects[projectIndex].updatedAt = new Date().toISOString();
-    await writeProjectsFile(projects);
-    return criterion;
-  });
-}
-
-export async function updateProjectGateCriterion(
-  projectId: string,
-  gateId: string,
-  criterionId: string,
-  input: GateCriterionInput,
-) {
-  if (getOperationalDataBackend() === "postgres") {
-    return postgresOperational.updateProjectGateCriterion(
-      projectId,
-      gateId,
-      criterionId,
-      input,
-    );
-  }
-  return withGateWorkflowLock(async () => {
-    const projects = await readProjectsFile();
-    const projectIndex = projects.findIndex((project) => project.id === projectId);
-
-    if (projectIndex === -1) {
-      return null;
-    }
-
-    const gate = projects[projectIndex].gates.find((gate) => gate.id === gateId);
-    const criterionIndex = gate?.criteria.findIndex(
-      (criterion) => criterion.id === criterionId,
-    ) ?? -1;
-
-    if (!gate || !isGateInPreparation(gate) || criterionIndex === -1) {
-      return null;
-    }
-
-    const criterion: GateCriterion = {
-      id: criterionId,
-      templateId: gate.criteria[criterionIndex].templateId,
-      ...input,
-    };
-
-    gate.criteria[criterionIndex] = criterion;
-    projects[projectIndex].updatedAt = new Date().toISOString();
-    await writeProjectsFile(projects);
-    return criterion;
-  });
-}
-
-export async function deleteProjectGateCriterion(projectId: string, gateId: string, criterionId: string) {
-  if (getOperationalDataBackend() === "postgres") {
-    return postgresOperational.deleteProjectGateCriterion(
-      projectId,
-      gateId,
-      criterionId,
-    );
-  }
-  return withGateWorkflowLock(async () => {
-    const projects = await readProjectsFile();
-    const projectIndex = projects.findIndex((project) => project.id === projectId);
-
-    if (projectIndex === -1) {
-      return false;
-    }
-
-    const gate = projects[projectIndex].gates.find((gate) => gate.id === gateId);
-    const criterionIndex = gate?.criteria.findIndex(
-      (criterion) => criterion.id === criterionId,
-    ) ?? -1;
-
-    if (
-      !gate ||
-      !isGateInPreparation(gate) ||
-      criterionIndex === -1 ||
-      gate.criteria[criterionIndex].templateId
-    ) {
-      return false;
-    }
-
-    gate.criteria.splice(criterionIndex, 1);
-    projects[projectIndex].updatedAt = new Date().toISOString();
-    await writeProjectsFile(projects);
-    await removeCriterionFromDeliverables(criterionId);
     return true;
   });
 }

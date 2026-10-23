@@ -6,6 +6,7 @@ import {
   requireProjectRole,
   withAuthorizedProjectMutation,
 } from "@/lib/authorization";
+import { confirmGateMatrixReview } from "@/lib/applicability";
 import {
   createDeliverable,
   deleteDeliverable,
@@ -17,7 +18,6 @@ import {
   getGateReviewApprovalState,
   isGateInPreparation,
   parseGateApproverFormData,
-  parseGateCriterionFormData,
   type GateReviewResponseInput,
 } from "@/lib/gates";
 import {
@@ -26,16 +26,13 @@ import {
 } from "@/lib/gate-review-invitations";
 import {
   createPackageGateApprover,
-  createPackageGateCriterion,
   deletePackageGateApprover,
-  deletePackageGateCriterion,
   getPackage,
   getPackages,
   reopenPackageGate,
   respondToPackageGateReview,
   submitPackageGateForApproval,
   updatePackageGateApprover,
-  updatePackageGateCriterion,
   withdrawPackageGateSubmission,
 } from "@/lib/packages";
 import {
@@ -45,46 +42,53 @@ import {
 } from "@/lib/project-actions";
 import {
   createProjectGateApprover,
-  createProjectGateCriterion,
   deleteProjectGateApprover,
-  deleteProjectGateCriterion,
   getProject,
   reopenProjectGate,
   respondToProjectGateReview,
   submitProjectGateForApproval,
   updateProjectGateApprover,
-  updateProjectGateCriterion,
   withdrawProjectGateSubmission,
 } from "@/lib/projects";
 import { getOperationalDataBackend } from "@/lib/operational/backend";
+import {
+  linkActiveGateReviewApproverUser,
+} from "@/lib/operational/postgres";
 
 export async function submitProjectGateForApprovalAction(projectId: string, gateId: string) {
-  const result = await withAuthorizedProjectMutation({
-    projectId,
-    minimumRole: "editor",
-    audit: {
-      eventType: "gate.submitted",
-      resourceType: "gate",
-      resourceId: gateId,
-    },
-    isSuccess: (
-      candidate: Awaited<ReturnType<typeof submitProjectGateForApproval>>,
-    ) => candidate?.outcome === "submitted",
-    operation: (actor) => submitProjectGateForApproval(projectId, gateId, {
-      userId: actor.id,
-      displayName: actor.displayName,
-      email: actor.email,
-      providerTenantId: actor.providerTenantId,
-      providerObjectId: actor.providerObjectId,
-    }),
-  });
+  const path = projectGatePath(projectId, gateId);
+  let result: Awaited<ReturnType<typeof submitProjectGateForApproval>>;
+  try {
+    result = await withAuthorizedProjectMutation({
+      projectId,
+      minimumRole: "editor",
+      audit: {
+        eventType: "gate.submitted",
+        resourceType: "gate",
+        resourceId: gateId,
+      },
+      isSuccess: (
+        candidate: Awaited<ReturnType<typeof submitProjectGateForApproval>>,
+      ) => candidate?.outcome === "submitted",
+      operation: (actor) => submitProjectGateForApproval(projectId, gateId, {
+        userId: actor.id,
+        displayName: actor.displayName,
+        email: actor.email,
+        providerTenantId: actor.providerTenantId,
+        providerObjectId: actor.providerObjectId,
+      }),
+    });
+  } catch (error) {
+    logUnexpectedSubmissionError("project", projectId, null, gateId, error);
+    redirect(withSubmissionError(path, "unexpected"));
+  }
 
   if (!result) {
     notFound();
   }
 
   if (result.outcome !== "submitted") {
-    redirect(projectGatePath(projectId, gateId));
+    redirect(withSubmissionError(path, result.outcome));
   }
 
   const gateApproverIds = getGateReviewApprovalState(result.reviewCycle)
@@ -97,11 +101,30 @@ export async function submitProjectGateForApprovalAction(projectId: string, gate
   });
   revalidateProjectGate(projectId, gateId);
   redirect(withSubmissionResult(
-    projectGatePath(projectId, gateId),
+    path,
     result.reviewCycle.id,
     result.reviewCycle.cycleNumber,
     invitationFailures,
   ));
+}
+
+export async function confirmProjectGateMatrixReviewAction(
+  projectId: string,
+  gateId: string,
+) {
+  const result = await withAuthorizedProjectMutation({
+    projectId,
+    minimumRole: "editor",
+    audit: {
+      eventType: "gate.matrix_review_confirmed",
+      resourceType: "gate",
+      resourceId: gateId,
+    },
+    operation: (actor) => confirmGateMatrixReview(projectId, null, gateId, actor),
+  });
+  if (!result) notFound();
+  revalidateProjectGate(projectId, gateId);
+  redirect(projectGatePath(projectId, gateId));
 }
 
 export async function submitPackageGateForApprovalAction(
@@ -109,33 +132,40 @@ export async function submitPackageGateForApprovalAction(
   packageId: string,
   gateId: string,
 ) {
-  const result = await withAuthorizedProjectMutation({
-    projectId,
-    minimumRole: "editor",
-    audit: {
-      eventType: "gate.submitted",
-      resourceType: "gate",
-      resourceId: gateId,
-      metadata: { packageId },
-    },
-    isSuccess: (
-      candidate: Awaited<ReturnType<typeof submitPackageGateForApproval>>,
-    ) => candidate?.outcome === "submitted",
-    operation: (actor) => submitPackageGateForApproval(projectId, packageId, gateId, {
-      userId: actor.id,
-      displayName: actor.displayName,
-      email: actor.email,
-      providerTenantId: actor.providerTenantId,
-      providerObjectId: actor.providerObjectId,
-    }),
-  });
+  const path = packageGatePath(projectId, packageId, gateId);
+  let result: Awaited<ReturnType<typeof submitPackageGateForApproval>>;
+  try {
+    result = await withAuthorizedProjectMutation({
+      projectId,
+      minimumRole: "editor",
+      audit: {
+        eventType: "gate.submitted",
+        resourceType: "gate",
+        resourceId: gateId,
+        metadata: { packageId },
+      },
+      isSuccess: (
+        candidate: Awaited<ReturnType<typeof submitPackageGateForApproval>>,
+      ) => candidate?.outcome === "submitted",
+      operation: (actor) => submitPackageGateForApproval(projectId, packageId, gateId, {
+        userId: actor.id,
+        displayName: actor.displayName,
+        email: actor.email,
+        providerTenantId: actor.providerTenantId,
+        providerObjectId: actor.providerObjectId,
+      }),
+    });
+  } catch (error) {
+    logUnexpectedSubmissionError("package", projectId, packageId, gateId, error);
+    redirect(withSubmissionError(path, "unexpected"));
+  }
 
   if (!result) {
     notFound();
   }
 
   if (result.outcome !== "submitted") {
-    redirect(packageGatePath(projectId, packageId, gateId));
+    redirect(withSubmissionError(path, result.outcome));
   }
 
   const gateApproverIds = getGateReviewApprovalState(result.reviewCycle)
@@ -149,11 +179,37 @@ export async function submitPackageGateForApprovalAction(
   });
   revalidatePackageGate(projectId, packageId, gateId);
   redirect(withSubmissionResult(
-    packageGatePath(projectId, packageId, gateId),
+    path,
     result.reviewCycle.id,
     result.reviewCycle.cycleNumber,
     invitationFailures,
   ));
+}
+
+export async function confirmPackageGateMatrixReviewAction(
+  projectId: string,
+  packageId: string,
+  gateId: string,
+) {
+  const result = await withAuthorizedProjectMutation({
+    projectId,
+    minimumRole: "editor",
+    audit: {
+      eventType: "gate.matrix_review_confirmed",
+      resourceType: "gate",
+      resourceId: gateId,
+      metadata: { packageId },
+    },
+    operation: (actor) => confirmGateMatrixReview(
+      projectId,
+      packageId,
+      gateId,
+      actor,
+    ),
+  });
+  if (!result) notFound();
+  revalidatePackageGate(projectId, packageId, gateId);
+  redirect(packageGatePath(projectId, packageId, gateId));
 }
 
 export async function respondToProjectGateReviewAction(
@@ -279,13 +335,78 @@ export async function retryPackageGateReviewInvitationAction(
   ));
 }
 
-export async function withdrawProjectGateSubmissionAction(projectId: string, gateId: string) {
+export async function linkActiveGateReviewApproverUserAction(
+  projectId: string,
+  packageId: string | null,
+  gateId: string,
+  reviewCycleId: string,
+  gateApproverId: string,
+  userId: string,
+) {
+  const linked = await withAuthorizedProjectMutation({
+    projectId,
+    minimumRole: "owner",
+    audit: {
+      eventType: "gate_review.assignment_linked",
+      resourceType: "gate_review_cycle",
+      resourceId: reviewCycleId,
+      changeSummary: { assignedUserId: userId },
+      metadata: { gateId, packageId, gateApproverId },
+    },
+    operation: () => linkActiveGateReviewApproverUser({
+      projectId,
+      packageId,
+      gateId,
+      reviewCycleId,
+      gateApproverId,
+      userId,
+    }),
+  });
+  if (!linked) {
+    throw new Error("The active Review Cycle Approver could not be linked to that verified User.");
+  }
+  if (packageId) {
+    revalidatePackageGate(projectId, packageId, gateId);
+    redirect(packageGatePath(projectId, packageId, gateId));
+  }
+  revalidateProjectGate(projectId, gateId);
+  redirect(projectGatePath(projectId, gateId));
+}
+
+export async function withdrawProjectGateSubmissionAction(
+  projectId: string,
+  gateId: string,
+  formData: FormData,
+) {
+  const withdrawalReason = requiredWithdrawalReason(formData);
   const result = await withAuthorizedProjectMutation({
     projectId,
-    minimumRole: "editor",
-    audit: { eventType: "gate.withdrawn", resourceType: "gate", resourceId: gateId },
-    isSuccess: (candidate) => candidate?.outcome === "withdrawn",
-    operation: () => withdrawProjectGateSubmission(projectId, gateId),
+    minimumRole: "owner",
+    audit: {
+      eventType: "gate.withdrawn",
+      resourceType: "gate",
+      resourceId: gateId,
+      changeSummary: {
+        gateStatus: { from: "submitted_for_approval", to: "not_submitted" },
+        reviewCycleStatus: { from: "awaiting_approval", to: "withdrawn" },
+      },
+      metadata: { withdrawalReason },
+    },
+    isSuccess: (
+      candidate: Awaited<ReturnType<typeof withdrawProjectGateSubmission>>,
+    ) => candidate?.outcome === "withdrawn",
+    operation: (actor) => withdrawProjectGateSubmission(
+      projectId,
+      gateId,
+      withdrawalReason,
+      {
+        userId: actor.id,
+        displayName: actor.displayName,
+        email: actor.email,
+        providerTenantId: actor.providerTenantId,
+        providerObjectId: actor.providerObjectId,
+      },
+    ),
   });
 
   if (!result) {
@@ -304,13 +425,38 @@ export async function withdrawPackageGateSubmissionAction(
   projectId: string,
   packageId: string,
   gateId: string,
+  formData: FormData,
 ) {
+  const withdrawalReason = requiredWithdrawalReason(formData);
   const result = await withAuthorizedProjectMutation({
     projectId,
-    minimumRole: "editor",
-    audit: { eventType: "gate.withdrawn", resourceType: "gate", resourceId: gateId, metadata: { packageId } },
-    isSuccess: (candidate) => candidate?.outcome === "withdrawn",
-    operation: () => withdrawPackageGateSubmission(projectId, packageId, gateId),
+    minimumRole: "owner",
+    audit: {
+      eventType: "gate.withdrawn",
+      resourceType: "gate",
+      resourceId: gateId,
+      changeSummary: {
+        gateStatus: { from: "submitted_for_approval", to: "not_submitted" },
+        reviewCycleStatus: { from: "awaiting_approval", to: "withdrawn" },
+      },
+      metadata: { packageId, withdrawalReason },
+    },
+    isSuccess: (
+      candidate: Awaited<ReturnType<typeof withdrawPackageGateSubmission>>,
+    ) => candidate?.outcome === "withdrawn",
+    operation: (actor) => withdrawPackageGateSubmission(
+      projectId,
+      packageId,
+      gateId,
+      withdrawalReason,
+      {
+        userId: actor.id,
+        displayName: actor.displayName,
+        email: actor.email,
+        providerTenantId: actor.providerTenantId,
+        providerObjectId: actor.providerObjectId,
+      },
+    ),
   });
 
   if (!result) {
@@ -323,6 +469,12 @@ export async function withdrawPackageGateSubmissionAction(
 
   revalidatePackageGate(projectId, packageId, gateId);
   redirect(packageGatePath(projectId, packageId, gateId));
+}
+
+function requiredWithdrawalReason(formData: FormData) {
+  const reason = String(formData.get("withdrawalReason") ?? "").trim();
+  if (!reason) throw new Error("A withdrawal reason is required.");
+  return reason;
 }
 
 export async function createProjectGateActionAction(projectId: string, gateId: string, formData: FormData) {
@@ -440,11 +592,12 @@ export async function reopenPackageGateAction(projectId: string, packageId: stri
 }
 
 export async function createProjectGateApproverAction(projectId: string, gateId: string, formData: FormData) {
+  const input = parseGateApproverFormData(formData);
   const approver = await withAuthorizedProjectMutation({
     projectId,
     minimumRole: "editor",
     audit: (created) => ({ eventType: "gate_approver.created", resourceType: "gate_approver", resourceId: created?.id ?? "unknown", metadata: { gateId } }),
-    operation: () => createProjectGateApprover(projectId, gateId, parseGateApproverFormData(formData)),
+    operation: () => createProjectGateApprover(projectId, gateId, input),
   });
 
   if (!approver) {
@@ -461,11 +614,12 @@ export async function updateProjectGateApproverAction(
   approverId: string,
   formData: FormData,
 ) {
+  const input = parseGateApproverFormData(formData);
   const approver = await withAuthorizedProjectMutation({
     projectId,
     minimumRole: "editor",
     audit: { eventType: "gate_approver.updated", resourceType: "gate_approver", resourceId: approverId, metadata: { gateId } },
-    operation: () => updateProjectGateApprover(projectId, gateId, approverId, parseGateApproverFormData(formData)),
+    operation: () => updateProjectGateApprover(projectId, gateId, approverId, input),
   });
 
   if (!approver) {
@@ -502,11 +656,12 @@ export async function createPackageGateApproverAction(
   gateId: string,
   formData: FormData,
 ) {
+  const input = parseGateApproverFormData(formData);
   const approver = await withAuthorizedProjectMutation({
     projectId,
     minimumRole: "editor",
     audit: (created) => ({ eventType: "gate_approver.created", resourceType: "gate_approver", resourceId: created?.id ?? "unknown", metadata: { gateId, packageId } }),
-    operation: () => createPackageGateApprover(projectId, packageId, gateId, parseGateApproverFormData(formData)),
+    operation: () => createPackageGateApprover(projectId, packageId, gateId, input),
   });
 
   if (!approver) {
@@ -524,11 +679,12 @@ export async function updatePackageGateApproverAction(
   approverId: string,
   formData: FormData,
 ) {
+  const input = parseGateApproverFormData(formData);
   const approver = await withAuthorizedProjectMutation({
     projectId,
     minimumRole: "editor",
     audit: { eventType: "gate_approver.updated", resourceType: "gate_approver", resourceId: approverId, metadata: { gateId, packageId } },
-    operation: () => updatePackageGateApprover(projectId, packageId, gateId, approverId, parseGateApproverFormData(formData)),
+    operation: () => updatePackageGateApprover(projectId, packageId, gateId, approverId, input),
   });
 
   if (!approver) {
@@ -560,127 +716,6 @@ export async function deletePackageGateApproverAction(
   redirect(packageGatePath(projectId, packageId, gateId));
 }
 
-export async function createProjectGateCriterionAction(projectId: string, gateId: string, formData: FormData) {
-  const criterion = await withAuthorizedProjectMutation({
-    projectId,
-    minimumRole: "editor",
-    audit: (created) => ({ eventType: "gate_criterion.created", resourceType: "gate_criterion", resourceId: created?.id ?? "unknown", metadata: { gateId } }),
-    operation: () => createProjectGateCriterion(projectId, gateId, parseGateCriterionFormData(formData)),
-  });
-
-  if (!criterion) {
-    notFound();
-  }
-
-  revalidateProjectGate(projectId, gateId);
-  redirect(projectGatePath(projectId, gateId));
-}
-
-export async function updateProjectGateCriterionAction(
-  projectId: string,
-  gateId: string,
-  criterionId: string,
-  formData: FormData,
-) {
-  const criterion = await withAuthorizedProjectMutation({
-    projectId,
-    minimumRole: "editor",
-    audit: { eventType: "gate_criterion.updated", resourceType: "gate_criterion", resourceId: criterionId, metadata: { gateId } },
-    operation: () => updateProjectGateCriterion(projectId, gateId, criterionId, parseGateCriterionFormData(formData)),
-  });
-
-  if (!criterion) {
-    notFound();
-  }
-
-  revalidateProjectGate(projectId, gateId);
-  redirect(projectGatePath(projectId, gateId));
-}
-
-export async function deleteProjectGateCriterionAction(
-  projectId: string,
-  gateId: string,
-  criterionId: string,
-) {
-  const deleted = await withAuthorizedProjectMutation({
-    projectId,
-    minimumRole: "editor",
-    audit: { eventType: "gate_criterion.deleted", resourceType: "gate_criterion", resourceId: criterionId, metadata: { gateId } },
-    operation: () => deleteProjectGateCriterion(projectId, gateId, criterionId),
-  });
-
-  if (!deleted) {
-    notFound();
-  }
-
-  revalidateProjectGate(projectId, gateId);
-  redirect(projectGatePath(projectId, gateId));
-}
-
-export async function createPackageGateCriterionAction(
-  projectId: string,
-  packageId: string,
-  gateId: string,
-  formData: FormData,
-) {
-  const criterion = await withAuthorizedProjectMutation({
-    projectId,
-    minimumRole: "editor",
-    audit: (created) => ({ eventType: "gate_criterion.created", resourceType: "gate_criterion", resourceId: created?.id ?? "unknown", metadata: { gateId, packageId } }),
-    operation: () => createPackageGateCriterion(projectId, packageId, gateId, parseGateCriterionFormData(formData)),
-  });
-
-  if (!criterion) {
-    notFound();
-  }
-
-  revalidatePackageGate(projectId, packageId, gateId);
-  redirect(packageGatePath(projectId, packageId, gateId));
-}
-
-export async function updatePackageGateCriterionAction(
-  projectId: string,
-  packageId: string,
-  gateId: string,
-  criterionId: string,
-  formData: FormData,
-) {
-  const criterion = await withAuthorizedProjectMutation({
-    projectId,
-    minimumRole: "editor",
-    audit: { eventType: "gate_criterion.updated", resourceType: "gate_criterion", resourceId: criterionId, metadata: { gateId, packageId } },
-    operation: () => updatePackageGateCriterion(projectId, packageId, gateId, criterionId, parseGateCriterionFormData(formData)),
-  });
-
-  if (!criterion) {
-    notFound();
-  }
-
-  revalidatePackageGate(projectId, packageId, gateId);
-  redirect(packageGatePath(projectId, packageId, gateId));
-}
-
-export async function deletePackageGateCriterionAction(
-  projectId: string,
-  packageId: string,
-  gateId: string,
-  criterionId: string,
-) {
-  const deleted = await withAuthorizedProjectMutation({
-    projectId,
-    minimumRole: "editor",
-    audit: { eventType: "gate_criterion.deleted", resourceType: "gate_criterion", resourceId: criterionId, metadata: { gateId, packageId } },
-    operation: () => deletePackageGateCriterion(projectId, packageId, gateId, criterionId),
-  });
-
-  if (!deleted) {
-    notFound();
-  }
-
-  revalidatePackageGate(projectId, packageId, gateId);
-  redirect(packageGatePath(projectId, packageId, gateId));
-}
-
 export async function createProjectDeliverableAction(projectId: string, gateId: string, formData: FormData) {
   await withAuthorizedProjectMutation({
     projectId,
@@ -695,7 +730,6 @@ export async function createProjectDeliverableAction(projectId: string, gateId: 
         packageId: null,
         gateId,
         stageId: gate.stageId,
-        validCriterionIds: gate.criteria.map((criterion) => criterion.id),
       }),
     );
     }),
@@ -725,7 +759,6 @@ export async function updateProjectDeliverableAction(
         packageId: null,
         gateId,
         stageId: gate.stageId,
-        validCriterionIds: gate.criteria.map((criterion) => criterion.id),
       }),
     );
 
@@ -787,7 +820,6 @@ export async function createPackageDeliverableAction(
         packageId,
         gateId,
         stageId: gate.stageId,
-        validCriterionIds: gate.criteria.map((criterion) => criterion.id),
       }),
     );
     }),
@@ -818,7 +850,6 @@ export async function updatePackageDeliverableAction(
         packageId,
         gateId,
         stageId: gate.stageId,
-        validCriterionIds: gate.criteria.map((criterion) => criterion.id),
       }),
     );
 
@@ -916,6 +947,30 @@ function parseDevelopmentGateReviewResponse(
 function withApprovalError(path: string, outcome: string) {
   const query = new URLSearchParams({ approvalError: outcome });
   return `${path}?${query}`;
+}
+
+function withSubmissionError(
+  path: string,
+  outcome: "blocked" | "not_current" | "not_in_preparation" | "unexpected",
+) {
+  const query = new URLSearchParams({ submissionError: outcome });
+  return `${path}?${query}`;
+}
+
+function logUnexpectedSubmissionError(
+  scope: "project" | "package",
+  projectId: string,
+  packageId: string | null,
+  gateId: string,
+  error: unknown,
+) {
+  console.error("Unexpected Gate submission failure.", {
+    scope,
+    projectId,
+    packageId,
+    gateId,
+    errorName: error instanceof Error ? error.name : "UnknownError",
+  });
 }
 
 function withSubmissionResult(

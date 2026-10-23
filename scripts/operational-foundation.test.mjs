@@ -36,8 +36,8 @@ test("the approved runtime projection is exact and deterministic", async () => {
   assert.equal(first.rawCounts.gateCriteria, 152);
   assert.equal(first.projectedCounts.gateCriteria, 155);
   assert.deepEqual(first.projection.summary, {
-    addedCriteria: 3,
-    templateVersionUpdates: 4,
+    retainedLegacyCriteria: 3,
+    templateVersionUpdates: 9,
     legacyNameUpdates: 2,
   });
   assert.equal(
@@ -50,19 +50,16 @@ test("the approved runtime projection is exact and deterministic", async () => {
   );
 });
 
-test("all five persisted Deliverable references resolve after projection", async () => {
+test("all persisted legacy Criterion links remain resolvable after projection", async () => {
   const source = await loadSource(sourceDirectory);
   const criterionIds = new Set([
     ...source.data.projects.flatMap((project) => project.gates),
     ...source.data.packages.flatMap((projectPackage) => projectPackage.gates),
   ].flatMap((gate) => gate.criteria.map((criterion) => criterion.id)));
-  const derivedIds = new Set(
-    source.projection.changes.addedCriteria.map((item) => item.criterion.id),
-  );
   const affected = source.data.deliverables.filter((deliverable) =>
-    deliverable.criterionIds.some((criterionId) => derivedIds.has(criterionId)));
+    deliverable.criterionIds.length > 0);
 
-  assert.equal(affected.length, 5);
+  assert.equal(affected.length, 7);
   assert.ok(affected.every((deliverable) =>
     deliverable.criterionIds.every((criterionId) => criterionIds.has(criterionId))));
 });
@@ -155,12 +152,23 @@ test("migration files are ordered, named, and checksummed", async () => {
       "005_protect_gate_review_attempt_history.sql",
       "006_runtime_persistence_safety.sql",
       "007_project_authorization_audit.sql",
+      "008_stage_gate_applicability.sql",
+      "009_gate_approver_identity_management.sql",
+      "010_gate_review_email_otp.sql",
+      "011_binary_applicability.sql",
+      "012_rename_project_applicability_matrix_deliverable.sql",
+      "013_package_applicability_matrix_deliverable.sql",
+      "014_gate_action_status_reconciliation.sql",
+      "015_deliverables_only_methodology.sql",
+      "016_remove_obsolete_procurement_teco.sql",
+      "017_gate_matrix_review_confirmation.sql",
+      "018_add_project_site_organization_ehs_plan.sql",
     ],
   );
   assert.ok(migrations.every((migration) => /^[0-9a-f]{64}$/.test(migration.checksum)));
 });
 
-test("project permission roles enforce the approved hierarchy", async () => {
+test("project permission roles enforce the approved hierarchy and owner-only operations", async () => {
   const { projectRoleAllows } = await import("../src/lib/project-permissions.ts");
   assert.equal(projectRoleAllows("owner", "owner"), true);
   assert.equal(projectRoleAllows("owner", "editor"), true);
@@ -244,6 +252,9 @@ test("production configuration rejects unsafe pilot and runtime settings", async
     MICROSOFT_CLIENT_SECRET: "configured-outside-source-control",
     MICROSOFT_TENANT_ID: "10000000-0000-4000-8000-000000000001",
     DATABASE_URL: "postgresql://runtime:secret@example-pooler.eu-central-1.aws.neon.tech/kaizen?sslmode=require",
+    RESEND_API_KEY: "configured-outside-source-control",
+    EMAIL_FROM: "Kaizen PM <notifications@example.com>",
+    GATE_REVIEW_OTP_SECRET: "separate-ci-only-otp-secret-with-at-least-32-characters",
   };
 
   assert.deepEqual(getProductionConfigurationIssues(safe), []);
@@ -252,15 +263,15 @@ test("production configuration rejects unsafe pilot and runtime settings", async
     OWNER_ONLY_PILOT: "false",
     OPERATIONAL_DATA_BACKEND: "json",
     DATABASE_URL: "postgresql://runtime:secret@example.eu-central-1.aws.neon.tech/kaizen",
-    RESEND_API_KEY: "configured-too-early",
     NEXT_PUBLIC_DATABASE_URL: "must-not-be-public",
+    NEXT_PUBLIC_GATE_REVIEW_OTP_SECRET: "must-not-be-public",
   });
   assert.ok(issues.some((issue) => issue.includes("OWNER_ONLY_PILOT")));
   assert.ok(issues.some((issue) => issue.includes("OPERATIONAL_DATA_BACKEND")));
   assert.ok(issues.some((issue) => issue.includes("pooled runtime endpoint")));
   assert.ok(issues.some((issue) => issue.includes("require TLS")));
-  assert.ok(issues.some((issue) => issue.includes("must be absent")));
   assert.ok(issues.some((issue) => issue.includes("NEXT_PUBLIC_DATABASE_URL")));
+  assert.ok(issues.some((issue) => issue.includes("NEXT_PUBLIC_GATE_REVIEW_OTP_SECRET")));
 });
 
 test("Owner identity transfers are fingerprinted and reject credential fields", async () => {

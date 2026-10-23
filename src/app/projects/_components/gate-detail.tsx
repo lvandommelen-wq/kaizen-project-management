@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { ApproverForm } from "./approver-form";
 import { ConfirmationAction } from "./confirmation-action";
 import { GateApprovalTestPanel } from "./gate-approval-test-panel";
 import {
@@ -7,8 +8,7 @@ import {
   type Deliverable,
 } from "@/lib/deliverables";
 import {
-  gateCriterionStatusLabels,
-  gateCriterionStatuses,
+  applicabilityLabels,
   gateReviewCycleStatusLabels,
   gateStatusLabels,
   canWithdrawGateReviewCycle,
@@ -16,11 +16,12 @@ import {
   getAwaitingGateReviewCycle,
   getGateCriterionStatusLabel,
   getGateReviewApprovalState,
-  getGateSubmissionIssues,
   isGateInPreparation,
   type Gate,
   type GateReviewCycle,
   type GateReviewInvitationAttemptStatus,
+  type GateSubmissionIssue,
+  type VerifiedApproverUser,
 } from "@/lib/gates";
 import {
   formatProjectActionId,
@@ -29,7 +30,12 @@ import {
   projectActionStatusLabels,
   type ProjectAction,
 } from "@/lib/project-actions";
+import {
+  formatCalendarDate as formatDate,
+  formatTimestamp as formatDateTime,
+} from "@/lib/date-format";
 import { getOperationalDataBackend } from "@/lib/operational/backend";
+import type { GateMatrixReviewState } from "@/lib/matrix-reviews";
 
 type FormAction = (formData: FormData) => void | Promise<void>;
 type ItemAction = (itemId: string) => void | Promise<void>;
@@ -38,38 +44,48 @@ type RetryInvitationAction = (
   reviewCycleId: string,
   gateApproverId: string,
 ) => void | Promise<void>;
+type LinkActiveIdentityAction = (
+  reviewCycleId: string,
+  gateApproverId: string,
+  userId: string,
+) => void | Promise<void>;
 
 type GateDetailProps = {
   backHref: string;
   backLabel: string;
   contextLabel: string;
+  applicabilityHref: string;
+  applicabilityEntryDeliverableId?: string;
   createApproverAction: FormAction;
-  createCriterionAction: FormAction;
-  createDeliverableAction: FormAction;
+  confirmMatrixReviewAction: FormAction;
   createGateActionAction: FormAction;
   deleteApproverAction: ItemAction;
-  deleteCriterionAction: ItemAction;
-  deleteDeliverableAction: ItemAction;
   deliverables: Deliverable[];
   gate: Gate;
   gateActions: ProjectAction[];
   gateActionPackageId: string | null;
   invitationFailureCount?: number;
   canEdit: boolean;
+  canManageActiveIdentityLinks: boolean;
+  canWithdrawSubmission: boolean;
   isCurrentGate: boolean;
+  matrixReview: GateMatrixReviewState | null;
   packages: { id: string; label: string }[];
   actionRegisterHref: string;
   approvalError?: string;
   approvalResponseAction: FormAction;
   reopenAction: FormAction;
   retryInvitationAction: RetryInvitationAction;
+  activeIdentityLinkCandidates: (VerifiedApproverUser & { gateApproverId: string })[];
+  linkActiveIdentityAction: LinkActiveIdentityAction;
   scopeLabel: string;
   stageLabel: string;
   submissionAction: FormAction;
+  submissionError?: string;
+  submissionIssues: GateSubmissionIssue[];
   submittedCycleNumber?: number;
   selectedReviewCycleId?: string;
   updateApproverAction: UpdateFormAction;
-  updateCriterionAction: UpdateFormAction;
   updateDeliverableAction: UpdateFormAction;
   withdrawSubmissionAction: FormAction;
 };
@@ -78,33 +94,38 @@ export function GateDetail({
   backHref,
   backLabel,
   contextLabel,
+  applicabilityHref,
+  applicabilityEntryDeliverableId,
   createApproverAction,
-  createCriterionAction,
-  createDeliverableAction,
+  confirmMatrixReviewAction,
   createGateActionAction,
   deleteApproverAction,
-  deleteCriterionAction,
-  deleteDeliverableAction,
   deliverables,
   gate,
   gateActions,
   gateActionPackageId,
   invitationFailureCount,
   canEdit,
+  canManageActiveIdentityLinks,
+  canWithdrawSubmission,
   isCurrentGate,
+  matrixReview,
   packages,
   actionRegisterHref,
   approvalError,
   approvalResponseAction,
   reopenAction,
   retryInvitationAction,
+  activeIdentityLinkCandidates,
+  linkActiveIdentityAction,
   scopeLabel,
   stageLabel,
   submissionAction,
+  submissionError,
+  submissionIssues,
   submittedCycleNumber,
   selectedReviewCycleId,
   updateApproverAction,
-  updateCriterionAction,
   updateDeliverableAction,
   withdrawSubmissionAction,
 }: GateDetailProps) {
@@ -116,18 +137,6 @@ export function GateDetail({
   const canPrepare = canEdit && isGateInPreparation(gate);
   const canConfigureApprovers = canPrepare;
   const canAddGateAction = isCurrentGate && canPrepare;
-  const submissionIssues = getGateSubmissionIssues(gate, deliverables, gateActions);
-  if (
-    getOperationalDataBackend() === "postgres" &&
-    gate.approvers.some(
-      (approver) => !approver.expectedProviderTenantId || !approver.expectedProviderObjectId,
-    )
-  ) {
-    submissionIssues.push({
-      code: "invalid_approver_identities",
-      message: "Every Gate Approver needs an authoritative Microsoft Entra Object ID before submission.",
-    });
-  }
   const canSubmit = isCurrentGate && canPrepare && submissionIssues.length === 0;
   const approversByLevel = groupApproversByLevel(gate.approvers);
   const approvalStatus = getApprovalStatus(gate);
@@ -136,25 +145,16 @@ export function GateDetail({
     : gateActions.length > 0
       ? "All Gate Actions Closed"
       : "No Gate Actions";
-  const orderedCriteria = [...gate.criteria].sort(
-    (left, right) => gateCriterionStatusPriority(left.status) - gateCriterionStatusPriority(right.status),
-  );
-  const completedCriteriaCount = gate.criteria.filter((criterion) => criterion.status === "completed").length;
-  const pendingCriteriaCount = gate.criteria.filter((criterion) => criterion.status === "pending").length;
-  const notApplicableCriteriaCount = gate.criteria.filter(
-    (criterion) => criterion.status === "not_applicable",
-  ).length;
-  const applicableCriteriaCount = gate.criteria.length - notApplicableCriteriaCount;
   const orderedDeliverables = [...deliverables].sort(
     (left, right) => deliverableStatusPriority(left.status) - deliverableStatusPriority(right.status),
   );
   const completedDeliverableCount = deliverables.filter(
-    (deliverable) => deliverable.status === "completed",
+    (deliverable) => deliverable.applicability === "applicable" && deliverable.status === "completed",
   ).length;
   const notApplicableDeliverableCount = deliverables.filter(
-    (deliverable) => deliverable.status === "not_applicable",
+    (deliverable) => deliverable.applicability === "not_applicable",
   ).length;
-  const applicableDeliverableCount = deliverables.length - notApplicableDeliverableCount;
+  const applicableDeliverableCount = deliverables.filter((deliverable) => deliverable.applicability === "applicable").length;
   const remainingDeliverableCount = applicableDeliverableCount - completedDeliverableCount;
 
   return (
@@ -232,9 +232,7 @@ export function GateDetail({
                         >
                           {approver.email}
                         </a>
-                        <p className="mt-2 font-mono text-xs text-slate-500">
-                          Entra Object ID: {approver.expectedProviderObjectId ?? "Not assigned"}
-                        </p>
+                        {approver.organizationName ? <p className="text-sm text-slate-600">{approver.organizationName}</p> : null}
                       </div>
 
                       {canConfigureApprovers ? (
@@ -283,6 +281,12 @@ export function GateDetail({
           </p>
         </div>
 
+        {submissionError ? (
+          <p className="mt-5 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-900">
+            {submissionErrorMessage(submissionError)}
+          </p>
+        ) : null}
+
         {awaitingReviewCycle ? (
           <div className="mt-5 space-y-4">
             <p className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
@@ -290,17 +294,22 @@ export function GateDetail({
               {submittedCycleNumber === awaitingReviewCycle.cycleNumber ? " was" : " is"} submitted for approval.
               The Gate Status is Submitted for Approval, and the {scopeLabel} Stage remains {stageLabel}.
             </p>
-            {canEdit && canWithdrawGateReviewCycle(awaitingReviewCycle) ? (
+            {canWithdrawSubmission && canWithdrawGateReviewCycle(awaitingReviewCycle) ? (
               <ConfirmationAction
                 action={withdrawSubmissionAction}
                 buttonLabel="Withdraw Submission"
                 confirmLabel="Withdraw Submission"
-                message={`Withdraw Review Cycle ${awaitingReviewCycle.cycleNumber} from approval? The current Review Cycle will be preserved as Withdrawn, the Gate will become editable again, and a later resubmission will create a new Review Cycle.`}
+                message={`Withdraw Review Cycle ${awaitingReviewCycle.cycleNumber} from approval? Its frozen evidence, invitations, and all previous responses will remain as historical records, but those approvals will no longer count toward Stage progression. The Gate will become editable and resubmission will create a new Review Cycle.`}
                 title="Withdraw Submission"
+                textArea={{
+                  label: "Withdrawal reason (required)",
+                  name: "withdrawalReason",
+                  required: true,
+                }}
               />
             ) : (
               <p className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
-                Withdrawal is unavailable because at least one Approver has submitted a formal response.
+                Only a Project Owner may withdraw an active Review Cycle. Withdrawal is unavailable after final Gate approval and Stage progression.
               </p>
             )}
             {approvalError ? (
@@ -328,7 +337,7 @@ export function GateDetail({
           <div className="mt-5 space-y-4">
             <p className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
               This Gate has a formal decision. Reopen it before making another decision. Reopening preserves
-              Criteria, Deliverables, Actions, and the current lifecycle Stage.
+              Deliverables, Actions, and the current lifecycle Stage.
             </p>
             {canEdit ? <ConfirmationAction
               action={reopenAction}
@@ -346,6 +355,14 @@ export function GateDetail({
               </p>
             ) : null}
 
+            {matrixReview ? (
+              <MatrixReviewCard
+                action={confirmMatrixReviewAction}
+                applicabilityHref={applicabilityHref}
+                state={matrixReview}
+              />
+            ) : null}
+
             {submissionIssues.length === 0 ? (
               <p className="rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
                 The Gate is sufficiently configured for formal submission.
@@ -356,6 +373,15 @@ export function GateDetail({
                 <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-amber-900">
                   {submissionIssues.map((issue) => <li key={issue.code}>{issue.message}</li>)}
                 </ul>
+                {submissionIssues.some((issue) =>
+                  issue.code === "missing_applicability_justification") ? (
+                  <Link
+                    href={applicabilityHref}
+                    className="mt-3 inline-block text-sm font-semibold text-amber-950 underline underline-offset-2"
+                  >
+                    Open {scopeLabel} Applicability Review
+                  </Link>
+                ) : null}
               </div>
             )}
 
@@ -384,7 +410,12 @@ export function GateDetail({
       </section>
 
       <ReviewHistory
+        actionRegisterHref={actionRegisterHref}
+        activeIdentityLinkCandidates={activeIdentityLinkCandidates}
+        canManageActiveIdentityLinks={canManageActiveIdentityLinks}
         cycles={gate.reviewCycles}
+        gateActions={gateActions}
+        linkActiveIdentityAction={linkActiveIdentityAction}
         retryInvitationAction={retryInvitationAction}
         selectedReviewCycleId={selectedReviewCycleId}
       />
@@ -447,83 +478,7 @@ export function GateDetail({
       <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <h2 className="text-lg font-semibold text-slate-950">Gate Criteria</h2>
-            <p className="mt-1 text-sm text-slate-600">
-              Conditions assessed during Gate Review. Pending Criteria prevent normal approval.
-            </p>
-          </div>
-          {gate.criteria.length > 0 ? (
-            <p className="rounded-full bg-slate-100 px-3 py-1.5 text-sm font-medium text-slate-700">
-              {completedCriteriaCount} / {applicableCriteriaCount} completed
-              <span aria-hidden="true"> &middot; </span>
-              {pendingCriteriaCount} pending
-              {notApplicableCriteriaCount > 0 ? (
-                <>
-                  <span aria-hidden="true"> &middot; </span>
-                  {notApplicableCriteriaCount} not applicable
-                </>
-              ) : null}
-            </p>
-          ) : null}
-        </div>
-
-        {gate.criteria.length === 0 ? (
-          <p className="mt-5 rounded-lg border border-dashed border-slate-300 bg-slate-50 p-4 text-sm text-slate-600">
-            No Gate Criteria have been added.
-          </p>
-        ) : (
-          <div className="mt-5 space-y-3">
-            {orderedCriteria.map((criterion) => (
-              <details
-                key={criterion.id}
-                open={criterion.status === "pending"}
-                className={`overflow-hidden rounded-lg border ${gateCriterionContainerClass(criterion.status)}`}
-              >
-                <summary className="cursor-pointer px-4 py-3 focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-slate-900">
-                  <div className="ml-1 flex flex-wrap items-center justify-between gap-3">
-                    <p className={`min-w-0 flex-1 text-sm font-medium ${criterion.status === "not_applicable" ? "text-slate-600" : "text-slate-950"}`}>
-                      {criterion.description}
-                    </p>
-                    <span className={`status-pill shrink-0 ${gateCriterionStatusClass(criterion.status)}`}>
-                      {gateCriterionStatusLabels[criterion.status]}
-                    </span>
-                  </div>
-                </summary>
-                <div className="border-t border-black/5 px-4 pb-4 pt-3">
-                  <p className="text-xs font-semibold text-slate-500">
-                    {criterion.templateId ? "Default Criterion" : "Custom Criterion"}
-                  </p>
-                  {canPrepare ? (
-                    <CriterionForm
-                      action={updateCriterionAction.bind(null, criterion.id)}
-                      description={criterion.description}
-                      status={criterion.status}
-                      submitLabel="Save criterion"
-                    />
-                  ) : null}
-                  {canPrepare && !criterion.templateId ? (
-                    <form action={deleteCriterionAction.bind(null, criterion.id)} className="mt-3 flex justify-end">
-                      <button type="submit" className="button-secondary">Delete custom criterion</button>
-                    </form>
-                  ) : null}
-                </div>
-              </details>
-            ))}
-          </div>
-        )}
-
-        {canPrepare ? (
-          <details className="mt-5 rounded-lg border border-slate-200 bg-slate-50 p-4">
-            <summary className="cursor-pointer text-sm font-semibold text-slate-900">Add Gate Criterion</summary>
-            <CriterionForm action={createCriterionAction} submitLabel="Add criterion" />
-          </details>
-        ) : null}
-      </section>
-
-      <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <h2 className="text-lg font-semibold text-slate-950">Related Deliverables</h2>
+            <h2 className="text-lg font-semibold text-slate-950">Stage Deliverables</h2>
             <p className="mt-1 text-sm text-slate-600">
               Deliverables are governance records, not files. Documents can be linked in a later iteration.
             </p>
@@ -545,28 +500,29 @@ export function GateDetail({
 
         {deliverables.length === 0 ? (
           <p className="mt-5 rounded-lg border border-dashed border-slate-300 bg-slate-50 p-4 text-sm text-slate-600">
-            No Deliverables are related to this Gate.
+            No Stage Deliverables are associated with this Gate.
           </p>
         ) : (
           <div className="mt-5 space-y-3">
             {orderedDeliverables.map((deliverable) => {
-              const supportedCriteria = gate.criteria.filter((criterion) =>
-                deliverable.criterionIds.includes(criterion.id),
-              );
+              const isApplicabilityEntry = deliverable.id === applicabilityEntryDeliverableId;
 
               return (
                 <details
                   key={deliverable.id}
-                  open={deliverable.status === "not_started" || deliverable.status === "in_progress"}
                   className={`overflow-hidden rounded-lg border ${deliverableContainerClass(deliverable.status)}`}
                 >
                   <summary className="cursor-pointer px-4 py-3 focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-slate-900">
                     <div className="ml-1 flex flex-wrap items-center justify-between gap-3">
-                      <h3 className={`min-w-0 flex-1 text-sm font-semibold ${deliverable.status === "not_applicable" ? "text-slate-600" : "text-slate-950"}`}>
-                        {deliverable.title}
-                      </h3>
+                       <h3 className={`min-w-0 flex-1 text-sm font-semibold ${deliverable.applicability !== "applicable" ? "text-slate-600" : "text-slate-950"}`}>
+                         {isApplicabilityEntry ? (
+                           <Link href={applicabilityHref} className="text-blue-700 underline-offset-2 hover:underline">
+                             {deliverable.title}
+                           </Link>
+                         ) : deliverable.title}
+                       </h3>
                       <span className={`status-pill shrink-0 ${deliverableStatusClass(deliverable.status)}`}>
-                        {deliverableStatusLabels[deliverable.status]}
+                         {deliverable.applicability === "applicable" ? deliverableStatusLabels[deliverable.status] : applicabilityLabels[deliverable.applicability]}
                       </span>
                     </div>
                   </summary>
@@ -574,36 +530,18 @@ export function GateDetail({
                     <p className="text-xs font-semibold text-slate-500">
                       {deliverable.templateId ? "Default Deliverable" : "Custom Deliverable"}
                     </p>
-                    <p className="mt-2 text-sm leading-6 text-slate-700">
-                      {deliverable.description || "No description entered."}
-                    </p>
+                     {deliverable.applicability === "not_applicable" ? <p className="mt-2 text-sm text-slate-600">Justification: {deliverable.applicabilityJustification || "Legacy decision — no historical justification recorded."}</p> : null}
                     <dl className="mt-4 grid gap-3 text-sm md:grid-cols-2">
                       <Detail label="Related stage" value={stageLabel} />
                       <Detail label="Scope level" value={scopeLabel} />
-                      <div className="md:col-span-2">
-                        <dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                          Supports Gate Criteria
-                        </dt>
-                        <dd className="mt-1 text-slate-900">
-                          {supportedCriteria.length > 0
-                            ? supportedCriteria.map((criterion) => criterion.description).join("; ")
-                            : "No Criteria linked."}
-                        </dd>
-                      </div>
                     </dl>
-                    {canPrepare ? (
+                    {canPrepare && deliverable.applicability === "applicable" ? (
                       <DeliverableForm
                         action={updateDeliverableAction.bind(null, deliverable.id)}
                         deliverable={deliverable}
-                        gate={gate}
                         stageLabel={stageLabel}
                         submitLabel="Save Deliverable"
                       />
-                    ) : null}
-                    {canPrepare && !deliverable.templateId ? (
-                      <form action={deleteDeliverableAction.bind(null, deliverable.id)} className="mt-3 flex justify-end">
-                        <button type="submit" className="button-secondary">Delete custom Deliverable</button>
-                      </form>
                     ) : null}
                   </div>
                 </details>
@@ -612,28 +550,88 @@ export function GateDetail({
           </div>
         )}
 
-        {canPrepare ? (
-          <details className="mt-5 rounded-lg border border-slate-200 bg-slate-50 p-4">
-            <summary className="cursor-pointer text-sm font-semibold text-slate-900">Add Deliverable</summary>
-            <DeliverableForm
-              action={createDeliverableAction}
-              gate={gate}
-              stageLabel={stageLabel}
-              submitLabel="Add Deliverable"
-            />
-          </details>
-        ) : null}
       </section>
     </div>
   );
 }
 
+function MatrixReviewCard({
+  action,
+  applicabilityHref,
+  state,
+}: {
+  action: FormAction;
+  applicabilityHref: string;
+  state: GateMatrixReviewState;
+}) {
+  const isFinal = state.target.reviewScope === "final_lifecycle";
+  const focusedHref = state.target.targetStageId
+    ? `${applicabilityHref}?stage=${encodeURIComponent(state.target.targetStageId)}`
+    : `${applicabilityHref}?review=final_lifecycle`;
+  const statusLabel = state.effectiveStatus === "confirmed"
+    ? "Confirmed"
+    : state.effectiveStatus === "outdated"
+      ? "Review outdated"
+      : "Confirmation required";
+  const statusClass = state.effectiveStatus === "confirmed"
+    ? "status-green"
+    : "status-amber";
+
+  return (
+    <section className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-semibold text-slate-950">
+            {isFinal ? "Final Applicability Matrix Review" : "Next Stage Deliverables Review"}
+          </h3>
+          <p className="mt-1 text-sm text-slate-700">
+            {isFinal ? "Reviewed scope" : "Next Stage"}: <strong>{state.target.targetStageLabel}</strong>
+          </p>
+        </div>
+        <span className={`status-pill ${statusClass}`}>{statusLabel}</span>
+      </div>
+      <dl className="mt-3 grid gap-2 text-sm sm:grid-cols-2">
+        <Detail label="Applicable Deliverables" value={String(state.applicableCount)} />
+        <Detail label="Not Applicable Deliverables" value={String(state.notApplicableCount)} />
+      </dl>
+      {state.confirmation ? (
+        <p className="mt-3 text-sm text-slate-600">
+          {state.effectiveStatus === "outdated" ? "Previously confirmed" : "Confirmed"} {formatDateTime(state.confirmation.confirmedAt)} by {state.confirmation.reviewer.displayName}.
+        </p>
+      ) : null}
+      <p className="mt-2 text-xs text-slate-500">
+        Opening the matrix does not confirm the review. Confirmation records the current Deliverable configuration and applicability decisions.
+      </p>
+      <div className="mt-4 flex flex-wrap gap-3">
+        <Link href={focusedHref} className="button-secondary">
+          {isFinal ? "Review Final Applicability Matrix" : "Review Next Stage Deliverables"}
+        </Link>
+        <form action={action}>
+          <button type="submit" className="button-secondary">
+            {isFinal ? "Confirm Final Applicability Matrix" : "Confirm Next Stage Deliverables"}
+          </button>
+        </form>
+      </div>
+    </section>
+  );
+}
+
 function ReviewHistory({
+  actionRegisterHref,
+  activeIdentityLinkCandidates,
+  canManageActiveIdentityLinks,
   cycles,
+  gateActions,
+  linkActiveIdentityAction,
   retryInvitationAction,
   selectedReviewCycleId,
 }: {
+  actionRegisterHref: string;
+  activeIdentityLinkCandidates: (VerifiedApproverUser & { gateApproverId: string })[];
+  canManageActiveIdentityLinks: boolean;
   cycles: GateReviewCycle[];
+  gateActions: ProjectAction[];
+  linkActiveIdentityAction: LinkActiveIdentityAction;
   retryInvitationAction: RetryInvitationAction;
   selectedReviewCycleId?: string;
 }) {
@@ -697,6 +695,11 @@ function ReviewHistory({
                   View frozen Review Cycle
                 </summary>
                 <div className="mt-4 space-y-5">
+                  {cycle.status === "withdrawn" ? (
+                    <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                      This Review Cycle was withdrawn. All responses below are retained as historical evidence but are no longer effective for Gate approval or Stage progression. They are not carried into a later Review Cycle.
+                    </p>
+                  ) : null}
                   <dl className="grid gap-3 text-sm md:grid-cols-2 xl:grid-cols-4">
                     <Detail label="Project" value={`${cycle.project.projectNumber} - ${cycle.project.name}`} />
                     <Detail
@@ -707,32 +710,34 @@ function ReviewHistory({
                     <Detail label="Related Stage" value={cycle.gate.stageLabel} />
                   </dl>
 
-                  <FrozenList
-                    heading={`Criteria (${cycle.frozenEvidence.criteria.length})`}
-                    emptyLabel="No Criteria were included."
-                    items={cycle.frozenEvidence.criteria.map((criterion) => ({
-                      id: criterion.criterionId,
-                      title: criterion.description,
-                      detail: getGateCriterionStatusLabel(criterion.status),
-                    }))}
-                  />
+                  <FrozenMatrixReviewEvidence cycle={cycle} />
+
+                  {cycle.frozenEvidence.criteria.length > 0 ? (
+                    <FrozenList
+                      heading={`Legacy Gate Criteria (${cycle.frozenEvidence.criteria.length})`}
+                      emptyLabel="No legacy Gate Criteria were included."
+                      items={cycle.frozenEvidence.criteria.map((criterion) => ({
+                        id: criterion.criterionId,
+                        title: criterion.description,
+                        detail: getGateCriterionStatusLabel(criterion.status),
+                      }))}
+                    />
+                  ) : null}
                   <FrozenList
                     heading={`Deliverables (${cycle.frozenEvidence.deliverables.length})`}
                     emptyLabel="No Deliverables were included."
                     items={cycle.frozenEvidence.deliverables.map((deliverable) => ({
                       id: deliverable.deliverableId,
                       title: deliverable.title,
-                      detail: deliverableStatusLabels[deliverable.status],
+                       detail: deliverable.status === "not_applicable"
+                         ? "Not Applicable"
+                         : deliverableStatusLabels[deliverable.status],
                     }))}
                   />
-                  <FrozenList
-                    heading={`Gate Actions (${cycle.frozenEvidence.acceptedActions.length})`}
-                    emptyLabel="No Gate Actions were included."
-                    items={cycle.frozenEvidence.acceptedActions.map((action) => ({
-                      id: action.actionId,
-                      title: `${formatProjectActionId(action.sequence)} - ${action.description}`,
-                      detail: `${projectActionStatusLabels[action.status]} | ${action.assignee} | Due ${formatDate(action.dueDate)}`,
-                    }))}
+                  <FollowUpActionList
+                    actionRegisterHref={actionRegisterHref}
+                    cycle={cycle}
+                    gateActions={gateActions}
                   />
 
                   <div>
@@ -749,24 +754,46 @@ function ReviewHistory({
                                 <p className="font-semibold text-slate-950">
                                   Level {approver.approvalLevel} - {approver.approvalRole}
                                 </p>
-                                <p className="mt-1 text-slate-700">
-                                  {approver.name} | {approver.roleFunction} | {approver.email}
-                                </p>
+                                 <p className="mt-1 text-slate-700">
+                                   {approver.name} | {approver.roleFunction} | {approver.email}
+                                 </p>
+                                 {approver.authenticationMethod === "email_otp" ? (
+                                   <p className="mt-1 text-xs font-semibold text-blue-700">Email OTP verification</p>
+                                 ) : null}
                               </div>
-                              <span className={`status-pill ${approverResponseStatusClass(approver.response?.outcome)}`}>
-                                 {approver.response?.outcome === "approved"
-                                   ? "Approved"
-                                   : approver.response?.outcome === "returned_for_rework"
-                                     ? "Returned for Rework"
-                                    : "Pending Response"}
-                              </span>
+                               <span className={`status-pill ${approverResponseStatusClass(approver.response?.outcome)}`}>
+                                  {approver.response?.outcome === "approved"
+                                    ? cycle.status === "withdrawn" ? "Historical Approval" : "Approved"
+                                  : approver.response?.outcome === "returned_for_rework"
+                                      ? cycle.status === "withdrawn" ? "Historical Rework Response" : "Returned for Rework"
+                                     : cycle.status === "withdrawn" ? "No Response Before Withdrawal" : "Pending Response"}
+                               </span>
                             </div>
-                            {approver.response ? (
-                              <p className="mt-2 text-slate-600">
-                                {formatDateTime(approver.response.respondedAt)} by {approver.response.respondedBy.displayName}
-                                {approver.response.comment ? ` - ${approver.response.comment}` : ""}
-                              </p>
-                            ) : null}
+                             {approver.response ? (
+                               <p className="mt-2 text-slate-600">
+                                 {cycle.status === "withdrawn" ? "Historical response: " : ""}{formatDateTime(approver.response.respondedAt)} by {approver.response.respondedBy.displayName}
+                                 {approver.response.comment ? ` - ${approver.response.comment}` : ""}
+                               </p>
+                             ) : null}
+                              {cycle.status === "awaiting_approval" && !approver.authenticationMethod && approver.response === null && !approver.assignedUserId && canManageActiveIdentityLinks ? (() => {
+                               const candidate = activeIdentityLinkCandidates.find(
+                                 (item) => item.gateApproverId === approver.gateApproverId,
+                               );
+                               return candidate ? (
+                                 <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3">
+                                   <p className="text-sm text-amber-950">
+                                     Verified identity match: <strong>{candidate.displayName}</strong> ({candidate.email})
+                                   </p>
+                                   <form action={linkActiveIdentityAction.bind(null, cycle.id, approver.gateApproverId, candidate.id)} className="mt-2">
+                                     <button type="submit" className="button-secondary">Link verified User</button>
+                                   </form>
+                                 </div>
+                               ) : (
+                                 <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+                                   No exact verified identity match is available. Withdraw and resubmit after correcting the live assignment.
+                                 </p>
+                               );
+                             })() : null}
                             <InvitationDelivery
                               approver={approver}
                               canRetry={canRetryGateReviewInvitation(
@@ -802,6 +829,39 @@ function ReviewHistory({
         </div>
       )}
     </section>
+  );
+}
+
+function FrozenMatrixReviewEvidence({ cycle }: { cycle: GateReviewCycle }) {
+  const confirmation = cycle.frozenEvidence.matrixReviewConfirmation;
+  const matrix = cycle.frozenEvidence.applicabilityMatrix;
+  if (!confirmation || !matrix) return null;
+  const reviewedGates = confirmation.reviewScope === "final_lifecycle"
+    ? matrix.gates
+    : matrix.gates.filter((gate) => gate.stageId === confirmation.targetStageId);
+  const items = reviewedGates.flatMap((gate) => gate.items.map((item) => ({
+    id: `${gate.gateId}:${item.itemId}`,
+    title: `${gate.stageLabel}: ${item.title}`,
+    detail: `${applicabilityLabels[item.applicability === "to_be_determined" ? "applicable" : item.applicability]}${item.justification ? ` — Justification: ${item.justification}` : ""}`,
+  })));
+
+  return (
+    <div className="rounded-lg border border-blue-200 bg-blue-50 p-4">
+      <h4 className="text-sm font-semibold text-blue-950">Applicability Matrix confirmation</h4>
+      <p className="mt-1 text-sm text-blue-900">
+        {confirmation.targetStageLabel} confirmed {formatDateTime(confirmation.confirmedAt)} by {confirmation.reviewer.displayName}.
+      </p>
+      <p className="mt-1 break-all text-xs text-blue-800">
+        Fingerprint: {confirmation.matrixFingerprint}
+      </p>
+      <div className="mt-4">
+        <FrozenList
+          heading={`Reviewed Deliverables (${items.length})`}
+          emptyLabel="No Deliverables were included in the reviewed matrix scope."
+          items={items}
+        />
+      </div>
+    </div>
   );
 }
 
@@ -926,80 +986,79 @@ function FrozenList({
   );
 }
 
-function ApproverForm({
-  action,
-  approver,
-  submitLabel,
+function FollowUpActionList({
+  actionRegisterHref,
+  cycle,
+  gateActions,
 }: {
-  action: FormAction;
-  approver?: Gate["approvers"][number];
-  submitLabel: string;
+  actionRegisterHref: string;
+  cycle: GateReviewCycle;
+  gateActions: ProjectAction[];
 }) {
+  const items = cycle.frozenEvidence.acceptedActions.map((frozenAction) => {
+    const liveAction = gateActions.find((action) => action.id === frozenAction.actionId);
+    const decisionReference = liveAction?.gateDecisionReferences.find(
+      (reference) => reference.reviewCycleId === cycle.id,
+    );
+    const approvalSnapshot = decisionReference?.approvalSnapshot;
+    return {
+      actionId: frozenAction.actionId,
+      sequence: approvalSnapshot?.sequence ?? frozenAction.sequence,
+      description: approvalSnapshot?.description ?? frozenAction.description,
+      assignee: approvalSnapshot?.assignee ?? frozenAction.assignee,
+      dueDate: approvalSnapshot?.dueDate ?? frozenAction.dueDate,
+      frozenStatus: approvalSnapshot?.status ?? frozenAction.status,
+      liveAction,
+      hasApprovalSnapshot: Boolean(approvalSnapshot),
+    };
+  });
+
   return (
-    <form action={action} className="mt-4 grid gap-4 md:grid-cols-2">
-      <label className="grid gap-2 text-sm font-medium text-slate-700">
-        Name
-        <input
-          name="name"
-          required
-          defaultValue={approver?.name}
-          className="h-11 rounded-lg border border-slate-300 bg-white px-3 text-slate-950 shadow-sm outline-none focus:border-slate-900 focus:ring-2 focus:ring-slate-200"
-        />
-      </label>
-      <label className="grid gap-2 text-sm font-medium text-slate-700">
-        Email address
-        <input
-          type="email"
-          name="email"
-          required
-          defaultValue={approver?.email}
-          className="h-11 rounded-lg border border-slate-300 bg-white px-3 text-slate-950 shadow-sm outline-none focus:border-slate-900 focus:ring-2 focus:ring-slate-200"
-        />
-      </label>
-      <label className="grid gap-2 text-sm font-medium text-slate-700">
-        Role / Function
-        <input
-          name="roleFunction"
-          required
-          defaultValue={approver?.roleFunction}
-          className="h-11 rounded-lg border border-slate-300 bg-white px-3 text-slate-950 shadow-sm outline-none focus:border-slate-900 focus:ring-2 focus:ring-slate-200"
-        />
-      </label>
-      <label className="grid gap-2 text-sm font-medium text-slate-700">
-        Gate Approval Role
-        <input
-          name="approvalRole"
-          required
-          defaultValue={approver?.approvalRole}
-          className="h-11 rounded-lg border border-slate-300 bg-white px-3 text-slate-950 shadow-sm outline-none focus:border-slate-900 focus:ring-2 focus:ring-slate-200"
-        />
-      </label>
-      <label className="grid gap-2 text-sm font-medium text-slate-700">
-        Approval Level
-        <input
-          type="number"
-          name="approvalLevel"
-          required
-          min="1"
-          step="1"
-          defaultValue={approver?.approvalLevel ?? 1}
-          className="h-11 rounded-lg border border-slate-300 bg-white px-3 text-slate-950 shadow-sm outline-none focus:border-slate-900 focus:ring-2 focus:ring-slate-200"
-        />
-      </label>
-      <label className="grid gap-2 text-sm font-medium text-slate-700 md:col-span-2">
-        Microsoft Entra Object ID
-        <input
-          name="providerObjectId"
-          defaultValue={approver?.expectedProviderObjectId ?? ""}
-          placeholder="00000000-0000-0000-0000-000000000000"
-          className="h-11 rounded-lg border border-slate-300 bg-white px-3 font-mono text-sm text-slate-950 shadow-sm outline-none focus:border-slate-900 focus:ring-2 focus:ring-slate-200"
-        />
-        <span className="font-normal text-slate-500">Required for PostgreSQL Gate submission. Use the B2B guest Object ID from this application&apos;s Entra tenant; email is delivery-only.</span>
-      </label>
-      <div className="flex items-end justify-end">
-        <button type="submit" className="button-primary">{submitLabel}</button>
-      </div>
-    </form>
+    <div>
+      <h4 className="text-sm font-semibold text-slate-950">
+        Gate Actions — Follow-up ({items.length})
+      </h4>
+      {items.length === 0 ? (
+        <p className="mt-2 text-sm text-slate-500">No Gate follow-up Actions were included.</p>
+      ) : (
+        <ul className="mt-2 space-y-2">
+          {items.map((item) => (
+            <li key={item.actionId} className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p className="font-medium text-slate-900">
+                    {formatProjectActionId(item.sequence)} - {item.description}
+                  </p>
+                  <p className="mt-1 text-slate-600">
+                    Frozen {item.hasApprovalSnapshot ? "at approval" : "Review evidence"}: {projectActionStatusLabels[item.frozenStatus]} | {item.assignee} | Due {formatDate(item.dueDate)}
+                  </p>
+                </div>
+                {item.liveAction ? (
+                  <Link
+                    href={`${actionRegisterHref}#action-${encodeURIComponent(item.actionId)}`}
+                    className="text-sm font-semibold text-blue-700 underline"
+                  >
+                    Open Action
+                  </Link>
+                ) : null}
+              </div>
+              {item.liveAction ? (
+                <p className="mt-2 text-slate-700">
+                  Current status: <strong>{projectActionStatusLabels[item.liveAction.status]}</strong>
+                  {item.liveAction.closingDate
+                    ? ` | Closed ${formatDate(item.liveAction.closingDate)}`
+                    : ""}
+                </p>
+              ) : (
+                <p className="mt-2 font-medium text-amber-800">
+                  Live Action unavailable. Frozen historical evidence is retained.
+                </p>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 
@@ -1020,60 +1079,14 @@ function groupApproversByLevel<Approver extends { approvalLevel: number }>(appro
     }));
 }
 
-function CriterionForm({
-  action,
-  description,
-  status = "pending",
-  submitLabel,
-}: {
-  action: FormAction;
-  description?: string;
-  status?: Gate["criteria"][number]["status"];
-  submitLabel: string;
-}) {
-  return (
-    <form action={action} className="mt-4 grid gap-4 md:grid-cols-[minmax(0,1fr)_14rem_auto] md:items-end">
-      <label className="grid gap-2 text-sm font-medium text-slate-700">
-        Description
-        <textarea
-          name="description"
-          required
-          rows={3}
-          defaultValue={description}
-          className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-950 shadow-sm outline-none focus:border-slate-900 focus:ring-2 focus:ring-slate-200"
-        />
-      </label>
-      <label className="grid gap-2 text-sm font-medium text-slate-700">
-        Status
-        <select
-          name="status"
-          defaultValue={status}
-          className="h-11 rounded-lg border border-slate-300 bg-white px-3 text-slate-950 shadow-sm outline-none focus:border-slate-900 focus:ring-2 focus:ring-slate-200"
-        >
-          {gateCriterionStatuses.map((criterionStatus) => (
-            <option key={criterionStatus} value={criterionStatus}>
-              {gateCriterionStatusLabels[criterionStatus]}
-            </option>
-          ))}
-        </select>
-      </label>
-      <button type="submit" className="button-primary">
-        {submitLabel}
-      </button>
-    </form>
-  );
-}
-
 function DeliverableForm({
   action,
   deliverable,
-  gate,
   stageLabel,
   submitLabel,
 }: {
   action: FormAction;
   deliverable?: Deliverable;
-  gate: Gate;
   stageLabel: string;
   submitLabel: string;
 }) {
@@ -1102,39 +1115,9 @@ function DeliverableForm({
           ))}
         </select>
       </label>
-      <label className="grid gap-2 text-sm font-medium text-slate-700 md:col-span-2">
-        Description
-        <textarea
-          name="description"
-          rows={3}
-          defaultValue={deliverable?.description}
-          className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-950 shadow-sm outline-none focus:border-slate-900 focus:ring-2 focus:ring-slate-200"
-        />
-      </label>
       <div className="rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700">
         Related Stage: <span className="font-semibold text-slate-950">{stageLabel}</span>
       </div>
-      <fieldset className="rounded-lg border border-slate-200 bg-white px-4 py-3 md:col-span-2">
-        <legend className="px-1 text-sm font-medium text-slate-700">Supports Gate Criteria</legend>
-        {gate.criteria.length === 0 ? (
-          <p className="text-sm text-slate-500">Add Gate Criteria before linking this Deliverable to them.</p>
-        ) : (
-          <div className="grid gap-2 md:grid-cols-2">
-            {gate.criteria.map((criterion) => (
-              <label key={criterion.id} className="flex items-start gap-2 text-sm text-slate-700">
-                <input
-                  type="checkbox"
-                  name="criterionIds"
-                  value={criterion.id}
-                  defaultChecked={deliverable?.criterionIds.includes(criterion.id)}
-                  className="mt-1 size-4 accent-slate-900"
-                />
-                {criterion.description}
-              </label>
-            ))}
-          </div>
-        )}
-      </fieldset>
       <div className="flex justify-end md:col-span-2">
         <button type="submit" className="button-primary">
           {submitLabel}
@@ -1371,10 +1354,17 @@ function approvalErrorMessage(error: string) {
   return "This Review Cycle is no longer accepting approval responses.";
 }
 
-function gateCriterionStatusPriority(status: Gate["criteria"][number]["status"]) {
-  if (status === "pending") return 0;
-  if (status === "completed") return 1;
-  return 2;
+function submissionErrorMessage(error: string) {
+  if (error === "blocked") {
+    return "Submission was not completed because one or more Gate requirements remain unresolved. Review the requirements below and try again.";
+  }
+  if (error === "not_current") {
+    return "Submission was not completed because this Gate no longer belongs to the current Stage. Refresh the Project or Package workflow before trying again.";
+  }
+  if (error === "not_in_preparation") {
+    return "Submission was not completed because this Gate is no longer in preparation. It may already have an active Review Cycle or a formal decision.";
+  }
+  return "Submission could not be completed because of an unexpected server error. No new Review Cycle was created; please try again.";
 }
 
 function deliverableStatusPriority(status: Deliverable["status"]) {
@@ -1382,18 +1372,6 @@ function deliverableStatusPriority(status: Deliverable["status"]) {
   if (status === "in_progress") return 1;
   if (status === "completed") return 2;
   return 3;
-}
-
-function gateCriterionContainerClass(status: Gate["criteria"][number]["status"]) {
-  if (status === "pending") return "border-amber-200 bg-amber-50/70";
-  if (status === "completed") return "border-emerald-200 bg-emerald-50/50";
-  return "border-slate-200 bg-slate-50";
-}
-
-function gateCriterionStatusClass(status: Gate["criteria"][number]["status"]) {
-  if (status === "pending") return "status-amber";
-  if (status === "completed") return "status-green";
-  return "status-not_assessed";
 }
 
 function deliverableContainerClass(status: Deliverable["status"]) {
@@ -1450,19 +1428,6 @@ function approverResponseStatusClass(outcome: "approved" | "returned_for_rework"
   if (outcome === "approved") return "status-green";
   if (outcome === "returned_for_rework") return "status-red";
   return "status-amber";
-}
-
-function formatDate(value: string | null) {
-  if (!value) return "Not set";
-  return new Intl.DateTimeFormat("en", { dateStyle: "medium" }).format(new Date(`${value}T00:00:00Z`));
-}
-
-function formatDateTime(value: string) {
-  return new Intl.DateTimeFormat("en", {
-    dateStyle: "medium",
-    timeStyle: "short",
-    timeZone: "UTC",
-  }).format(new Date(value));
 }
 
 function Detail({ label, value }: { label: string; value: string }) {

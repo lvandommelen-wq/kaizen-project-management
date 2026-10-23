@@ -1,61 +1,14 @@
 {
-  "version": 1,
+  "version": 4,
   "normalizer": {
     "path": "src/lib/gates.ts",
-    "sha256": "cf836a726d71e46d08c64bca25e1caf3a764281c79de3080a441da11cb33c49b"
+    "sha256": "48adf305bed8784a2c64e667f48aaf3466baa5286b6f410ac387c13d8e455044"
   },
   "templates": {
     "path": "src/lib/governance-templates.ts",
-    "sha256": "dd38bad6676d0a990417519598d9c3a87055cd8ebdb257ff3acf91278fc38ce0"
+    "sha256": "30f3df2800bc7b7b5f55c8b1be904c791bcdbe600fd5e7af2d47ff0479ab603d"
   },
-  "scalarChanges": [
-    {
-      "gateId": "a06aa8e3-3791-4c64-9b7a-6a29fea105ee:project_baseline_approval",
-      "field": "templateVersion",
-      "from": 3,
-      "to": 4
-    },
-    {
-      "gateId": "a06aa8e3-3791-4c64-9b7a-6a29fea105ee:project_delivery_complete",
-      "field": "templateVersion",
-      "from": 2,
-      "to": 3
-    },
-    {
-      "gateId": "20564176-89c2-4d66-86e2-7a4355e5f613:definition_complete",
-      "field": "templateVersion",
-      "from": 2,
-      "to": 3
-    },
-    {
-      "gateId": "20564176-89c2-4d66-86e2-7a4355e5f613:definition_complete",
-      "field": "name",
-      "from": "Definition Complete / Ready for Execution Strategy",
-      "to": "Definition Complete"
-    },
-    {
-      "gateId": "20564176-89c2-4d66-86e2-7a4355e5f613:execution_strategy_selection",
-      "field": "name",
-      "from": "Execution Strategy Selection",
-      "to": "Execution Model & Technical Selection"
-    },
-    {
-      "gateId": "20564176-89c2-4d66-86e2-7a4355e5f613:package_handover",
-      "field": "templateVersion",
-      "from": 2,
-      "to": 3
-    }
-  ],
-  "addedCriteria": [
-    {
-      "gateId": "a06aa8e3-3791-4c64-9b7a-6a29fea105ee:project_baseline_approval",
-      "criterion": {
-        "id": "a06aa8e3-3791-4c64-9b7a-6a29fea105ee:project_baseline_approval:production_integration_architecture_defined",
-        "templateId": "production_integration_architecture_defined",
-        "description": "Production integration architecture, master-data responsibilities and applicable ERP/MES requirements are defined.",
-        "status": "pending"
-      }
-    },
+  "retainedLegacyCriteria": [
     {
       "gateId": "20564176-89c2-4d66-86e2-7a4355e5f613:definition_complete",
       "criterion": {
@@ -73,6 +26,28 @@
         "description": "Required production master data is available and verified, production interfaces have been tested, and the receiving Production organization is ready to operate the equipment.",
         "status": "pending"
       }
+    },
+    {
+      "gateId": "a06aa8e3-3791-4c64-9b7a-6a29fea105ee:project_baseline_approval",
+      "criterion": {
+        "id": "a06aa8e3-3791-4c64-9b7a-6a29fea105ee:project_baseline_approval:production_integration_architecture_defined",
+        "templateId": "production_integration_architecture_defined",
+        "description": "Production integration architecture, master-data responsibilities and applicable ERP/MES requirements are defined.",
+        "status": "pending"
+      }
     }
+  ],
+  "scalarChanges": [
+    { "gateId": "20564176-89c2-4d66-86e2-7a4355e5f613:contract_award", "field": "templateVersion", "from": 2, "to": 6 },
+    { "gateId": "20564176-89c2-4d66-86e2-7a4355e5f613:definition_complete", "field": "name", "from": "Definition Complete / Ready for Execution Strategy", "to": "Definition Complete" },
+    { "gateId": "20564176-89c2-4d66-86e2-7a4355e5f613:definition_complete", "field": "templateVersion", "from": 2, "to": 6 },
+    { "gateId": "20564176-89c2-4d66-86e2-7a4355e5f613:execution_strategy_selection", "field": "name", "from": "Execution Strategy Selection", "to": "Execution Model & Technical Selection" },
+    { "gateId": "20564176-89c2-4d66-86e2-7a4355e5f613:execution_strategy_selection", "field": "templateVersion", "from": 2, "to": 6 },
+    { "gateId": "20564176-89c2-4d66-86e2-7a4355e5f613:package_closed", "field": "templateVersion", "from": 2, "to": 6 },
+    { "gateId": "20564176-89c2-4d66-86e2-7a4355e5f613:package_handover", "field": "templateVersion", "from": 2, "to": 6 },
+    { "gateId": "a06aa8e3-3791-4c64-9b7a-6a29fea105ee:project_baseline_approval", "field": "templateVersion", "from": 3, "to": 7 },
+    { "gateId": "a06aa8e3-3791-4c64-9b7a-6a29fea105ee:project_closed", "field": "templateVersion", "from": 2, "to": 6 },
+    { "gateId": "a06aa8e3-3791-4c64-9b7a-6a29fea105ee:project_delivery_complete", "field": "templateVersion", "from": 2, "to": 6 },
+    { "gateId": "a06aa8e3-3791-4c64-9b7a-6a29fea105ee:validation_complete", "field": "templateVersion", "from": 2, "to": 6 }
   ]
 }

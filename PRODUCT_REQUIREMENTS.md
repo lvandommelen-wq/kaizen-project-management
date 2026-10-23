@@ -143,7 +143,6 @@ Examples include:
 * Governance Tiers;
 * Stages;
 * Gates;
-* Gate Criteria;
 * Deliverables;
 * Actions;
 * Risks;
@@ -403,6 +402,10 @@ Validation should be configurable when creating the Project.
 
 A newly created Project starts in Initiation.
 
+During Initiation, the Project Manager must complete a Project Applicability Review covering all Project-level Deliverables across the active Project lifecycle. The review must use the Project-specific Gate records instantiated from the standard templates, must exclude the Validation Stage when Validation is not required, and must remain accessible throughout the Project lifecycle.
+
+The review creates a tailored Project methodology without modifying the master templates or any other Project. Each item must have one authoritative applicability value: Applicable or Not Applicable. Applicable is the default for all default and custom items. Not Applicable requires a justification for new decisions. Applicability is separate from completion status.
+
 Tendering, Procurement, FAT, Installation, Commissioning and similar Package activities should NOT normally be modeled as overall Project Stages because different Packages may perform these activities at different times.
 
 The exact lifecycle should eventually be configurable.
@@ -414,6 +417,103 @@ Stable internal identifiers should be used for lifecycle entities.
 ---
 
 # 9. Project Stages and Gates
+
+The Project methodology contains exactly 52 default Deliverables. Every default Deliverable has explicit acceptance requirements stored in its Deliverable description. Those requirements replace the former separate Gate Criteria checklist.
+
+### Project Authorization — 7 Deliverables
+
+1. Project Charter / Project Brief / One-pager
+2. Preliminary Project Scope
+3. Initial Budget
+4. Initial Master Schedule / Milestone Plan
+5. Initial Project RACI
+6. Business Case / ROI — where applicable
+7. Project Stage-Gate Deliverable Applicability Matrix
+
+The Charter must include the business need, objectives, benefits, initial organization, stakeholders, Risks, material Decisions and their justification. The Applicability Matrix is a mandatory, locked methodology control.
+
+### Project Baseline Approval — 18 Deliverables
+
+1. Approved Project Scope
+2. Approved URS / Overall Requirements
+3. Project Maintenance & Reliability Strategy
+4. Production Integration & Master Data Strategy
+5. Project Training & Qualification Requirements Matrix
+6. Concept / Basic Design
+7. Master Layout
+8. Package Breakdown / Scope Structure
+9. Project Budget Baseline
+10. Master Schedule Baseline
+11. Project Governance, RACI & Escalation Plan
+12. Project Site Organization & EHS Plan
+13. Procurement / Execution Strategy
+14. Interface Definition / Initial Interface Structure
+15. Validation Strategy / Plan — where applicable
+16. Initial RTM / Traceability Structure
+17. Project Risk & Issue Assessment
+18. Updated Business Case / Investment Justification
+
+The RTM is Applicable by default whether or not formal Validation is required. The Training & Qualification Requirements Matrix defines requirements that Packages must satisfy during Execution. Risk and Issue Assessments reference the living registers rather than duplicating them. The Project Site Organization & EHS Plan defines the common Project-wide site and EHS arrangements inherited by relevant Packages, contractors and subcontractors.
+
+#### Project Site Organization & EHS Plan
+
+The **Project Site Organization & EHS Plan** (`project_site_organization_ehs_plan`) is a Project-level governance Deliverable at the Project Baseline Approval Gate. It is Applicable by default and must be proportionate to the Project Scope and applicable legislation. It establishes the overarching requirements for:
+
+* site organization, access, logistics, storage and traffic management;
+* EHS roles, responsibilities, supervision and escalation;
+* permit-to-work policy, including hot work, working at height, confined spaces and electrical work where applicable;
+* Lockout/Tagout and energy-isolation requirements;
+* contractor onboarding, site induction and qualification;
+* the Health & Safety Plan and Project-specific Risk prevention;
+* SIMOPS and coordination of concurrent contractor and production activities;
+* lifting operations, temporary equipment and exclusion zones;
+* emergency arrangements and incident reporting;
+* PPE, housekeeping, waste management and environmental requirements; and
+* applicable construction-site legislation, safety coordination and H&S planning obligations.
+
+This Deliverable does not create a separate EHS checklist module or duplicate Package-level EHS Deliverables.
+
+### Project Delivery Complete — 12 Deliverables
+
+1. Package Handover Records
+2. Maintenance & Reliability Readiness Overview
+3. CMMS / EAM Integration & Verification
+4. Production Readiness & Integration Overview
+5. Production Master Data Integration & Verification
+6. Integrated SAT / System Test Evidence — where applicable
+7. Integrated Line / System Safety Release Checklist
+8. Updated Master Layout / appropriate as-built maturity
+9. Handover Documentation
+10. Training Documentation
+11. Outstanding Items / SNAG / Risk & Issue Disposition
+12. Updated RTM / Verification Evidence
+
+Scope, Budget, Schedule and MOC information remains controlled through living Project records rather than a separate Delivery reconciliation Deliverable. Relevant reconciliation must be addressed by the acceptance requirements and formal Gate evidence. Project Delivery owns consolidated verification of CMMS/EAM and Production Master Data integration. The integrated safety release checklist covers cross-Package safety interfaces and overall integrated-system readiness where applicable.
+
+### Validation Complete — 7 Deliverables
+
+1. IQ Protocol and Report
+2. OQ Protocol and Report
+3. PQ Protocol and Report
+4. Validation Deviation Documentation
+5. Final RTM / Validation Traceability Evidence
+6. Validation Summary Report
+7. Formal Release / Approval Evidence — where applicable
+
+The Validation Stage remains optional. Individual IQ, OQ and PQ Deliverables may be Not Applicable with justification. The Project RTM remains required even when the entire Validation Stage is excluded.
+
+### Project Closed — 8 Deliverables
+
+1. Final / As-Built Project Scope
+2. Final Master Layout
+3. Final Budget / Cost Report
+4. Final Schedule Performance Report
+5. Final RTM
+6. Final Project Handover & Acceptance Record
+7. Project Post-Mortem / Evaluation
+8. Customer As-Built Handover Package
+
+Lessons Learned form part of the Project Post-Mortem. The Customer As-Built Handover Package is a standard Applicable Deliverable. The Final Project Handover & Acceptance Record is supported by a checklist of required handover Deliverables, outstanding obligations, responsible owners and receiving-party acceptance; it must avoid duplicating signatures already supplied through the Gate approval workflow.
 
 ## 9.1 Initiation
 
@@ -439,6 +539,14 @@ Purpose:
 
 Authorize further Project definition and engineering.
 
+Default Deliverable:
+
+* **Project Stage-Gate Deliverable Applicability Matrix** — Generated from the structured Project applicability configuration. It identifies active Stages and Gates, default and custom Deliverables, applicability decisions and Not Applicable justifications. It must not be maintained as a separate spreadsheet. Its Deliverable title on the Project Authorization Gate provides the primary navigation to the existing Project Applicability Review while its completion status remains independently editable through Gate preparation.
+
+Before Project Authorization may be submitted, every new Project-level Not Applicable decision across the active lifecycle must have a justification. Package-specific decisions are not required for Packages that do not yet exist.
+
+The submitted Project Stage-Gate Deliverable Applicability Matrix must be frozen with the Project Authorization Review Cycle so that later tailoring cannot rewrite the approved methodology snapshot.
+
 ---
 
 ## 9.2 Definition & Design
@@ -460,6 +568,7 @@ Typical Project-level Deliverables/information:
 * Detailed Project Budget
 * Project RACI
 * Governance / escalation structure
+* **Project Site Organization & EHS Plan** — Defines the common site organization, EHS responsibilities, safety rules and working procedures applicable across relevant Packages, contractors and subcontractors.
 * Risk assessment
 * Interface Register
 * Validation Strategy / Plan where applicable
@@ -491,10 +600,7 @@ Original Baseline
 
 This principle should apply to Scope, Cost and Schedule.
 
-Additional Gate Criterion:
-
-* Project Maintenance & Reliability Strategy is defined and approved where applicable.
-* Production integration architecture, master-data responsibilities and applicable ERP/MES requirements are defined.
+The acceptance requirements of the applicable Definition & Design Deliverables cover maintenance and reliability, production integration and master-data responsibilities, baseline readiness, governance, site organization and EHS arrangements, interfaces, Risk and Issue assessment, traceability and investment justification.
 
 ---
 
@@ -540,11 +646,7 @@ Project-level Deliverables:
 
 This Gate confirms that the delivery activities required before Validation or Closure are sufficiently complete.
 
-Additional Gate Criterion:
-
-* Maintenance & Reliability readiness has been assessed across applicable Packages, and outstanding critical items are resolved or formally accepted.
-
-The Production Readiness & Integration Overview should provide evidence for the existing Project Delivery Complete Criteria covering cross-Package integration, Delivery verification evidence and training/handover to Operations. No additional Production-specific Criterion is required at this Gate. Final Production acceptance remains part of the existing Project Handover / Acceptance process.
+The acceptance requirements of the Project Delivery Complete Deliverables cover maintenance and reliability readiness, cross-Package integration, Delivery verification evidence, training and handover to Operations. Final Production acceptance remains part of the Project Handover / Acceptance process.
 
 ---
 
@@ -580,7 +682,7 @@ Supplier documentation and FAT/SAT evidence may support qualification activities
 
 ### Gate: Validation Complete
 
-Typical Gate Criteria:
+Required completion outcomes are expressed through the acceptance requirements of the Validation Deliverables, including:
 
 * applicable IQ completed;
 * applicable OQ completed;
@@ -616,7 +718,7 @@ Typical Deliverables/information:
 
 ### Gate: Project Closed
 
-Typical Gate Criteria:
+Required completion outcomes are expressed through the acceptance requirements of the Closure Deliverables, including:
 
 * required Packages closed;
 * Validation complete or not applicable;
@@ -665,6 +767,12 @@ Package codes should be unique within a Project.
 Packages progress independently.
 
 Creating a Package should eventually be capable of automatically provisioning the corresponding SharePoint Package structure.
+
+Package creation must use a two-step workflow: first save the Package's basic information, then review applicability for all Package-level Deliverables. New items are Applicable by default, and the Applicability Review must remain available from the Package page.
+
+The Package Applicability Review must group the Package-specific records by Stage and Gate and support Applicable and justified Not Applicable decisions for default and custom Deliverables. Package tailoring must not modify the Project methodology, another Package or the master templates. It does not require Sponsor approval for each individual decision.
+
+The Package Definition Complete Gate must include a default **Package Stage-Gate Deliverable Applicability Matrix** Deliverable. It represents the existing Package Applicability Review across the relevant Definition, Tendering, Procurement, Execution and Closure lifecycle, respecting the Package's existing optional-stage configuration and Execution Model. Its Deliverable title provides the primary Gate-page navigation to the existing Package Applicability Review while its completion status remains independently editable through Gate preparation. It must not create an additional Package-creation step, applicability register, data model or snapshot mechanism.
 
 ## 12.1 Package Execution Model
 
@@ -844,11 +952,80 @@ Skipping a Stage must be an explicit and traceable Decision.
 
 The application should not force users through Tendering or Procurement merely to satisfy a rigid workflow when those Stages are genuinely not applicable.
 
-Skipping a Stage must not automatically eliminate Deliverables, Gate Criteria or governance obligations that remain necessary.
+Skipping a Stage must not automatically eliminate Deliverables or governance obligations that remain necessary.
 
 ---
 
 # 14. Package Stages and Gates
+
+The Package methodology contains exactly 42 default Deliverables across the existing five-stage Package lifecycle. Tendering and Procurement remain subject to the existing lifecycle applicability and Execution Model configuration.
+
+### Definition Complete — 9 Deliverables
+
+1. Package Scope & Interface Definition
+2. Package Requirements
+3. Maintenance & Reliability Requirements
+4. Production Integration Requirements
+5. Package RACI / Package Organization
+6. Package Milestone Requirements
+7. Preliminary Internal Resource Estimate — where applicable
+8. Package Stage-Gate Deliverable Applicability Matrix
+9. Package Risk Assessment
+
+Package Requirements contain the applicable functional, technical, performance, safety, interface, documentation, FAT/SAT and acceptance requirements, including the relevant Project Site Organization & EHS Plan requirements. They support both supplier-facing RFQ preparation and internally executed detailed engineering. The Applicability Matrix remains mandatory and locked.
+
+### Execution Model & Technical Selection — 7 Deliverables
+
+1. RFQ / Tender Package
+2. Supplier Proposal(s) — where applicable
+3. Technical Evaluation / TECO — where applicable
+4. Maintenance & Reliability Evaluation
+5. Internal Execution Proposal — where applicable
+6. Internal Resource Estimate — where applicable
+7. Execution Model & Technical Selection Recommendation and Decision Record
+
+The final Decision Record covers technical evaluation, Internal-versus-External feasibility, Cost and Schedule implications, Risks, major Interfaces, the recommended Execution Model and the formal Decision without duplicating configured Gate approvals.
+
+### Contract Award — 4 Deliverables
+
+1. Commercial Evaluation & Award Recommendation
+2. Contract / CND
+3. CCA / LOI — where applicable
+4. Purchase Order
+
+Contract / CND covers contractual Scope, Interfaces, responsibilities, Schedule and applicable commercial terms. Commercial Evaluation & Award Recommendation covers comparison, negotiated position, Budget alignment, contractual Risks and supplier recommendation. Existing applicability logic remains available where a contractual instrument is not required.
+
+### Package Handover / Execution Complete — 17 Deliverables
+
+1. Approved Design Documentation
+2. FAT Protocol / Report — where applicable
+3. Installation Documentation — where applicable
+4. Commissioning Documentation — where applicable
+5. SAT Protocol / Report — where applicable
+6. Maintenance Strategy & Reliability Assessment
+7. CMMS / EAM Master Data Input Handover
+8. Maintenance Support, Spare Parts & Spares Information
+9. Package Training & Qualification Evidence
+10. Production Master Data Input Handover
+11. Production Interface & Integration Verification
+12. Production Operational Readiness & Training
+13. Manuals
+14. SNAG / Punch List
+15. Equipment Safety & Commissioning Release Checklist (Indienststelling)
+16. Handover & Provisional Acceptance Record
+17. As-Built Documentation
+
+Package Execution follows the approved Project site organization and EHS arrangements while preparing and handing over complete equipment-specific maintenance and production master-data inputs. Project Delivery owns consolidated receiving-system integration verification. Existing FAT/SAT and other test evidence should be reused rather than duplicated. The Equipment Safety & Commissioning Release Checklist remains separate equipment-specific safety acceptance evidence covering applicable EHS review, safety documentation, CE conformity, Risk assessment, safeguarding, emergency stops, LOTO and authorization for intended use. It must be completed before intended use, including when release precedes the administrative Package Handover Gate, while preserving applicable controlled commissioning and test-operation arrangements.
+
+### Package Closed — 5 Deliverables
+
+1. Final As-Built Package
+2. Final Package Cost Summary
+3. Final Acceptance Documentation — where applicable
+4. Warranty Documentation — where applicable
+5. Package Post-Mortem
+
+The Package Post-Mortem includes supplier or internal execution performance, Lessons Learned and improvement opportunities.
 
 ## 14.1 Definition
 
@@ -873,15 +1050,11 @@ Typical Deliverables/information:
 * **Maintenance & Reliability Requirements** — Defines maintainability requirements, applicable ACA/FLOCCA/FMECA/RCM2 analysis depth, CMMS/EAM master data, spare parts, training and support requirements.
 * **Production Integration Requirements** — Defines the Package-specific production integration requirements, including production order handling; production BOM/recipe requirements; material identification and consumption; batch/lot traceability; equipment-to-MES/ERP interfaces; production confirmations; relevant automation and IT/OT interfaces; and production master-data responsibilities where applicable.
 
-### Technical Specification
+### Package Requirements
 
-A Technical Specification is normally required before requesting meaningful external supplier proposals.
+Package Requirements consolidate the functional, technical, performance, safety, Interface, documentation, FAT/SAT and acceptance requirements formerly split across Package Requirements and a separate Technical Specification Deliverable. They incorporate the applicable common requirements from the approved Project Site Organization & EHS Plan without creating a duplicate Package EHS Deliverable.
 
-If Tendering will be performed, the Technical Specification should therefore be prepared as part of the Definition/Tender preparation process.
-
-If Tendering is skipped because Internal execution is selected during Definition, the Technical Specification must not disappear merely because there is no Tendering Stage.
-
-In that case, the required Technical Specification should remain a Definition Deliverable and provide the technical basis for Internal execution.
+If Tendering is performed, the RFQ / Tender Package translates these approved requirements, including applicable Project site and EHS obligations, into supplier-facing documentation. If Tendering is skipped because Internal execution is selected during Definition, Package Requirements provide the technical basis for detailed engineering and execution remains subject to the approved Project site organization and EHS arrangements.
 
 General principle:
 
@@ -891,10 +1064,9 @@ General principle:
 
 The Gate should determine whether the Package is sufficiently defined to proceed.
 
-Additional Gate Criterion:
+The default Definition Complete Deliverables include the **Package Stage-Gate Deliverable Applicability Matrix**. It remains available as navigation to the live Package Applicability Review after submission or approval, subject to the existing editing restrictions. The Package applicability configuration submitted with this Gate must continue to use the existing frozen Review Cycle applicability snapshot so later live changes cannot rewrite historical evidence.
 
-* Maintenance & Reliability requirements, responsibilities and required analysis depth are sufficiently defined.
-* Production integration requirements, interfaces and applicable master-data requirements are sufficiently defined.
+The acceptance requirements of the Definition Deliverables cover maintenance and reliability requirements, production integration, Interfaces, applicable master data and required analysis depth.
 
 Possible outcomes may include:
 
@@ -937,7 +1109,7 @@ Where Internal execution remains an option, the Internal execution proposal shou
 
 This Gate determines how the Package will be executed.
 
-Existing technical compliance, Cost, Schedule, Risk, Interface and execution-model Criteria should be used to assess the Maintenance & Reliability Evaluation without adding a separate maintenance-specific Gate Criterion.
+The Technical Evaluation, Maintenance & Reliability Evaluation and final Decision Record acceptance requirements cover technical compliance, Cost, Schedule, Risk, Interfaces and the Execution Model without a separate checklist.
 
 Production integration compliance should be evaluated within the existing Technical Evaluation / TECO. Tendering does not introduce an additional Production integration Deliverable.
 
@@ -1085,12 +1257,7 @@ This Gate confirms that the Package has been executed sufficiently for handover 
 
 For external equipment Packages this may correspond to Equipment Handover.
 
-For Internal Packages, terminology and Criteria may differ depending on Package type.
-
-Additional Gate Criterion:
-
-* Maintenance readiness is demonstrated, including approved maintenance strategy, verified CMMS/EAM integration, critical spare-parts readiness, defined support responsibilities and required personnel qualifications.
-* Required production master data is available and verified, production interfaces have been tested, and the receiving Production organization is ready to operate the equipment.
+For Internal Packages, supporting evidence and terminology may differ depending on Package type. The applicable Package Execution Deliverables must demonstrate maintenance readiness, complete equipment-specific CMMS/EAM and Production master-data input handover, tested production Interfaces, required personnel qualifications and readiness of the receiving Production organization.
 
 ---
 
@@ -1123,7 +1290,7 @@ Package Closed does NOT imply Project Closed.
 
 ---
 
-# 15. Gates, Gate Criteria, Deliverables and Stage Skipping
+# 15. Gates, Deliverables and Stage Skipping
 
 Stages may end with formal Gates.
 
@@ -1133,7 +1300,6 @@ A Gate should eventually support:
 * Planned date
 * Actual review date
 * Gate owner
-* Gate Criteria
 * Required Deliverables
 * Open Actions
 * Decision
@@ -1147,21 +1313,7 @@ Possible Gate Decisions:
 * Approved with Actions
 * Rejected / Rework required
 
-## 15.1 Gate Criterion
-
-A Gate Criterion is a condition that must be satisfied before the Gate may be passed.
-
-Examples:
-
-* Budget available;
-* no critical unresolved Interface Issue;
-* mandatory Deliverables approved;
-* technical solution approved;
-* required stakeholder approval obtained.
-
-A Gate Criterion does not necessarily correspond to a Document or artifact.
-
-## 15.2 Deliverable
+## 15.1 Deliverable
 
 A Deliverable is something that must be produced or achieved.
 
@@ -1177,15 +1329,13 @@ Examples:
 
 Documents may provide evidence that a Deliverable has been completed.
 
-One Gate Criterion may depend on multiple Deliverables.
-
 Conceptually:
 
 Stage
 → Gate
-→ Gate Criteria
+→ Deliverables with acceptance requirements
 
-Deliverables and other Project information provide evidence for satisfaction of Gate Criteria.
+Default Deliverables retain explicit acceptance requirements as legacy methodology metadata. These requirements may require evidence from controlled Documents, living registers, Project Controls or formal workflow records, but they are not maintained as a separate checklist. Acceptance requirements are not displayed or edited in the active Project Gate, Package Gate or Applicability Review interface. Existing stored descriptions must be preserved when another Deliverable field is edited.
 
 The application should not consider a Gate ready merely because required files exist.
 
@@ -1194,6 +1344,41 @@ Maintenance & Reliability Deliverables are governance records, not maintenance-a
 Production integration Deliverables are system-agnostic governance records. In an SAP PP-centric environment, SAP PP may manage production master data and production orders while local machines and operators perform production execution and consumption is recorded through confirmations or backflushing. In an MES-centric environment, ERP may manage planning, inventory and financial functions while MES manages detailed execution, recipes, electronic batch records and material genealogy and returns production confirmations and material consumption to ERP. SAP PP and PAS-X are examples rather than mandatory systems.
 
 The application should track production integration requirements, responsibilities, Deliverables and Verification evidence regardless of the underlying system architecture. These Deliverables may reference approved URS, Technical Specifications, Automation Design, FAT/SAT, training, handover, Validation and as-built documentation. A separate Document should not be created where approved existing evidence already provides the required information. This methodology does not introduce a separate Production module or production-system integration functionality.
+
+## 15.1.1 Applicability and Completion
+
+Applicability answers whether a Deliverable is required for a specific Project or Package. Completion answers whether its acceptance requirements have been satisfied. These are separate properties of the same Project/Package-specific Gate record.
+
+Applicability values are:
+
+* Applicable;
+* Not Applicable.
+
+Applicable is the default for every newly instantiated default item and every new custom item. The active workflow must not use an unresolved applicability state.
+
+Completion values remain:
+
+* Deliverable: Not Started, In Progress or Completed.
+
+An item that is Not Applicable must be displayed consistently as Not Applicable on both the Applicability Review and Gate page. Applicability changes must not modify the item's completion status. The status is preserved while the item is Not Applicable, excluded from Gate completion requirements, and becomes effective again if the item returns to Applicable. Returning an item to Applicable must not automatically mark an item Completed if it was not already Completed. A previously Completed item may be reopened through the normal Gate preparation workflow.
+
+New Not Applicable decisions require a short justification and must record the authenticated user and date/time. Historical Not Applicable records without a justification must be preserved without inventing a reason. Subsequent applicability changes must record who changed the decision and when it changed without modifying frozen Review Cycle evidence. The active workflow does not require a separate Reason for change field; previously recorded reasons remain immutable historical evidence.
+
+Template-created default items must remain traceable and must not be deleted merely because they are Not Applicable. PM-created custom items may be added and edited without an acceptance-requirement description, and may be removed only while they are not part of formal submitted or approved governance evidence.
+
+## 15.2 Living Applicability Matrix Review
+
+The single Project or Package Stage-Gate Deliverable Applicability Matrix is a living governance record. It is initially tailored across the complete active lifecycle during Project Initiation or Package Definition and remains available for authorized maintenance throughout the lifecycle. The existing Project and Package Applicability Matrix Deliverables remain locked and Applicable. Their completion records the initial tailoring activity and is independent of later Gate confirmations; it must not be reset when another Gate is prepared.
+
+Before every future eligible Project or Package Gate submission, an authenticated Project editor or owner must explicitly confirm the matrix configuration relevant to that Gate. Merely opening or viewing the matrix does not confirm it. For a non-Closure Gate, the review focuses on the next applicable Stage selected by the existing lifecycle rules. A Project with Validation disabled must skip Validation. Package review follows the configured Package lifecycle without introducing new Stage-skipping behavior. At Closure, the confirmation covers the final active lifecycle matrix rather than a nonexistent next Stage.
+
+For every Project or Package Gate with a next applicable Stage, the Gate page actions must be labelled **Review Next Stage Deliverables** and **Confirm Next Stage Deliverables**. The review action opens the existing Applicability Matrix focused on the Stage resolved by the lifecycle logic, and the page identifies it as **Reviewing Stage: [resolved Stage name]**. Closure Gates use **Review Final Applicability Matrix** and **Confirm Final Applicability Matrix** and identify **Reviewing Scope: Complete active lifecycle matrix**. Stage names must not be hardcoded into the action labels, and no separate matrix may be created.
+
+The Gate Submission area must show the reviewed Stage or final lifecycle, Applicable and Not Applicable Deliverable counts, a link to the existing matrix focused on the reviewed Stage where applicable, and the current confirmation status. The active matrix interface shows Deliverable title, Default or Custom classification, Stage/Gate grouping, applicability and any Not Applicable justification; it does not display or edit acceptance requirements. A valid confirmation records the Gate, reviewed Stage or final lifecycle, authenticated reviewer, timestamp and a deterministic fingerprint of the reviewed configuration.
+
+The fingerprint must cover the stable Deliverable set, titles, applicability decisions, Not Applicable justifications and acceptance requirements. It must not include completion status or mutable audit timestamps. A relevant change or a change in Deliverable composition invalidates the confirmation. Completion-status changes and changes confined to unrelated future Stages do not invalidate a next-Stage confirmation. Withdrawing a Review Cycle preserves the confirmation, which remains valid when the current fingerprint still matches; withdrawal alone must not require reconfirmation.
+
+Submission must transactionally verify the confirmation against the live PostgreSQL configuration. Each new Review Cycle must freeze the confirmation, reviewer attribution, fingerprint and complete current matrix, including the exact reviewed Stage applicability and stored acceptance metadata. Formal Gate Approvers review this immutable evidence through the existing sequential approval workflow. Previously submitted or approved Review Cycles remain unchanged, and already approved Gates must not be retroactively blocked. Dedicated historical approval views may continue to display the acceptance requirements contained in frozen evidence.
 
 ## 15.3 Stage Skipping
 
@@ -1208,7 +1393,7 @@ Skipping a Stage should record:
 * user responsible;
 * related Gate or Decision where applicable.
 
-Skipping a Stage must not automatically remove its relevant Deliverables or Gate Criteria.
+Skipping a Stage must not automatically remove its relevant Deliverables.
 
 Where a Deliverable remains necessary, it should be:
 
@@ -1222,7 +1407,7 @@ Not every Package requires direct ERP/MES integration. The existing Not Applicab
 
 Example:
 
-If an Internal Package skips Tendering, its Technical Specification may remain required and be completed during Definition.
+If an Internal Package skips Tendering, its Package Requirements remain required and provide the basis for detailed engineering.
 
 ## 15.4 Gate Review
 
@@ -1231,7 +1416,6 @@ A Gate is a formal governance decision authorizing progression from one Project 
 A Gate approval must therefore create a permanent and auditable record of:
 
 - what was reviewed;
-- which Gate Criteria were assessed;
 - which Deliverables were submitted;
 - which exact Document revisions/versions supported the review;
 - which open Actions were accepted;
@@ -1255,8 +1439,7 @@ The Gate Review Record should eventually contain at minimum:
 - review date;
 - Gate Decision;
 - Decision comments;
-- Gate Criteria and their status at the time of review;
-- Deliverables and their status at the time of review;
+- Deliverables, their acceptance requirements and their status at the time of review;
 - accepted open Actions;
 - required Approvers;
 - approval/signature status per Approver;
@@ -1284,7 +1467,6 @@ The supported Gate Decisions are:
 
 `Approved` means:
 
-- all mandatory Gate Criteria are Satisfied or Not Applicable;
 - all mandatory Deliverables are Completed or Not Applicable;
 - all required Approvers have provided the required approval/signature;
 - progression to the next applicable Stage is authorized.
@@ -1299,7 +1481,19 @@ The supported Gate Decisions are:
 - each accepted Action has an owner and due date;
 - required Approvers explicitly accept progression with those open Actions.
 
-`Approved with Actions` must not be used as a generic method for bypassing incomplete Gate Criteria or Deliverables.
+`Approved with Actions` must not be used as a generic method for bypassing incomplete Deliverables.
+
+The live Gate must remain `Approved with Actions` while one or more Actions explicitly linked to the controlling approved Review Cycle are not `Closed`. `Finished` is not equivalent to `Closed`. When the final controlling follow-up Action is Closed, the application must transactionally reconcile the live Gate to `Approved` without requiring another signature or changing the current Project or Package Stage. If a controlling Action is subsequently reopened, the live Gate must return to `Approved with Actions`; closing it again must restore `Approved`.
+
+Automatic reconciliation must use only explicit, reliable Action-to-Review-Cycle relationships. Unrelated Project or Package Actions, Actions linked only to another Review Cycle and ambiguous historical references without a Review Cycle ID must not affect the live Gate. Reconciliation must append an attributable, timestamped audit event while preserving the original Review Cycle decision, approval responses, signatures and completion evidence.
+
+At final approval, each linked follow-up Action must retain immutable approval-time evidence including its stable Action ID, sequence, description, owner, due date, status, Gate reference and Review Cycle reference. This approval-time evidence must remain separate from the live Action record. Existing frozen Review Cycle evidence and historical references must not be rewritten, inferred or backfilled.
+
+Internal Review History must present these records under **Gate Actions — Follow-up**, showing frozen Action evidence separately from current live status, the current closure date where available and a direct link to the corresponding Project Master Action Register entry. If the live Action is unavailable, its frozen historical evidence must remain visible with an unavailable-reference indication. External OTP Review access must remain limited to its authorized frozen Review Cycle evidence and must not expose live Action Register links or unrelated Project or Package information.
+
+An Action referenced by a formal Gate decision must not be deleted. Reopening remains available through the authorized Action workflow and must preserve Action history and trigger the corresponding live Gate reconciliation. A separate waiver, cancellation or MOC disposition workflow is outside this increment.
+
+The same reconciliation, evidence, audit and deletion rules apply to Project Gates and Package Gates.
 
 ### Rejected / Rework Required
 
@@ -1308,7 +1502,7 @@ The supported Gate Decisions are:
 - the Gate has been formally reviewed;
 - progression has not been authorized;
 - the Project or Package remains in the current Stage;
-- Criteria, Deliverables and other relevant information may be updated;
+- Deliverables and other relevant information may be updated;
 - the Gate may subsequently be submitted for review again.
 
 ### Not Reviewed
@@ -1384,30 +1578,40 @@ The exact approval structure should be configurable per Project and, where appli
 
 The Project Manager or another authorized user should be able to configure the Approvers required for each Gate.
 
-An Approver should eventually support information such as:
+An Approver configuration contains:
 
 - name;
 - organization;
 - role/function;
 - email address;
-- application user identity where available;
 - required approval role;
-- approval sequence where applicable;
-- approval status.
+- approval sequence where applicable.
 
-Where an Approver is already a known Project stakeholder or application user, the existing stakeholder/user record should be referenced rather than creating unnecessary duplicate identity information.
+The same person may fulfil different approval roles on different Projects or Gates. Each live Gate Approver assignment is configured directly using name, email address, optional organization, Role / Function, Gate Approval Role and Approval Level. Configuration and submission must not require an application User, Microsoft Entra tenant ID, Object ID, B2B onboarding, prior sign-in or identity-linking status.
 
-The application should distinguish between:
+All new Gate Review Cycles use email one-time-code verification for internal and external Approvers. Microsoft Entra and Better Auth remain the authentication mechanism for the operational application and its Project users, but they are not prerequisites for Gate approval access.
 
-- the person's identity;
-- their Project role;
-- their approval role for a specific Gate.
+On submission, each frozen Approver assignment receives an opaque assignment-specific Review Gate access identifier. Possession of the link identifies the assignment but does not authorize access to frozen evidence or a response. The Approver must request and successfully verify a one-time code delivered to the exact frozen email address before the application establishes a restricted Review Cycle session.
 
-The same person may fulfil different approval roles on different Projects or Gates.
+The one-time code must:
 
-The PM may configure an Approver's identity and contact information but must never enter or manage another user's password or authentication credentials.
+- be generated using a cryptographically secure random source;
+- be stored only as a keyed digest and never logged or persisted in plaintext;
+- expire after 10 minutes;
+- be single-use;
+- permit no more than five failed verification attempts;
+- enforce a minimum 60-second resend interval and no more than five code requests per assignment in one hour;
+- return non-enumerating user-facing errors.
 
-The Approver must authenticate using their own credentials when providing the approval/signature.
+A successful verification establishes an HTTP-only, same-site, restricted Review Cycle session lasting no more than 30 minutes. The session authorizes only its exact frozen Review Cycle Approver assignment and cannot grant operational application access. Approval and Return for Rework remain server-authorized against the active Review Cycle, session, frozen assignment and sequential Approval Level at the moment of response.
+
+Withdrawn, returned, completed or superseded Review Cycles must not issue or verify new codes. A session cannot submit a response after withdrawal or another terminal transition. Resubmission creates new frozen assignments, access identifiers and OTP authority; no code, session or approval carries forward.
+
+OTP requests, sanitized delivery outcomes, failed and successful verification events, session creation and OTP-authorized responses must be audit logged without recording the code, code digest or session token.
+
+Historical Entra-authorized Review Cycles, Approver snapshots, responses, timestamps, comments and identity evidence must remain unchanged. Migration to email OTP is forward-only and must not backfill, relabel or rewrite those records.
+
+The PM may configure an Approver's identity and contact information but must never enter or manage another user's password, OTP or authentication credentials.
 
 ---
 
@@ -1420,12 +1624,14 @@ When a Gate is submitted for approval:
 1. the PM completes the Gate Review;
 2. the Gate Review content and supporting evidence are frozen for that review cycle;
 3. the required Approvers are identified;
-4. each required Approver receives an approval/signature invitation when their configured Approval Level becomes eligible;
-5. the Approver securely accesses the Gate Review;
-6. the Approver reviews the Gate Decision, Criteria, Deliverables, accepted Actions and supporting evidence;
-7. the Approver approves/signs or rejects/comments;
-8. the application records the result and timestamp;
-9. the Gate is considered fully approved only when the required approval conditions have been met.
+4. each required Approver receives an assignment-specific approval/signature invitation when their configured Approval Level becomes eligible;
+5. the Approver requests and verifies a one-time code sent to the frozen email address;
+6. the application establishes a restricted, short-lived Review Cycle session;
+7. the Approver securely accesses the frozen Gate Review evidence;
+8. the Approver reviews the Gate Decision, Deliverables, acceptance requirements, accepted Actions and supporting evidence;
+9. the Approver approves/signs or returns the Gate for rework with comments;
+10. the application records the result, timestamp and OTP session attribution;
+11. the Gate is considered fully approved only when the required approval conditions have been met.
 
 The application should provide visibility of approval progress.
 
@@ -1446,7 +1652,7 @@ Known failed deliveries may be retried manually while the Approver remains eligi
 
 Invitation delivery failure must not record, alter or imply an approval Decision. It should be reported clearly without undoing the submitted Review Cycle.
 
-The formal approval/signature should occur through a secure authenticated workflow.
+The formal approval/signature should occur through the restricted email OTP workflow for all new Review Cycles.
 
 ---
 
@@ -1454,9 +1660,7 @@ The formal approval/signature should occur through a secure authenticated workfl
 
 A Gate approval/signature must be attributable to an identifiable person.
 
-Where possible, Approvers should authenticate using the application's enterprise identity/authentication mechanism.
-
-Given the planned Microsoft and SharePoint architecture, integration with Microsoft enterprise identity / Entra ID should be considered.
+Operational application users authenticate through Microsoft Entra / Better Auth. Gate Approvers authenticate their frozen assignment through email OTP, regardless of whether they are also operational application users.
 
 The application should eventually record sufficient information to demonstrate:
 
@@ -1479,14 +1683,17 @@ The application must not claim regulatory electronic-signature compliance merely
 
 When a Gate Review is formally submitted for approval, the evidence being reviewed should be frozen for that review cycle.
 
+New Review Cycles freeze the Deliverables-only methodology. Historical Review Cycles created under the former Gate Criteria methodology retain their immutable Criteria snapshots and must continue to render them as legacy historical evidence. Legacy Criteria must not re-enter active applicability, completion or submission-readiness workflows.
+
 This includes, where applicable:
 
-- Gate Criteria and their status;
-- Deliverables and their status;
+- Deliverables, their acceptance requirements and their status;
 - accepted open Actions;
 - controlled Document revisions;
 - relevant baseline references;
 - other supporting evidence.
+
+Every new Review Cycle must contain the complete current Project or Package Stage-Gate Deliverable Applicability Matrix and its explicit Gate review confirmation. These snapshots must identify default and custom items, descriptions, applicability decisions and Not Applicable justifications, together with the reviewed Stage or final lifecycle, authenticated reviewer, confirmation timestamp and deterministic fingerprint. Later live changes must not modify the snapshot. Historical Review Cycles without a matrix confirmation remain valid and readable and must not be rewritten.
 
 The application should retain immutable references to the exact revisions/versions used for the Gate Decision.
 
@@ -1509,7 +1716,7 @@ If any of these Documents or Controls subsequently change, the historical Gate R
 
 SharePoint is the Document system of record.
 
-Where a Deliverable or Gate Criterion is supported by a SharePoint Document, the Gate Review should eventually retain a stable reference to the exact SharePoint Document and version/revision reviewed.
+Where a Deliverable is supported by a SharePoint Document, the Gate Review should eventually retain a stable reference to the exact SharePoint Document and version/revision reviewed.
 
 The application should not rely solely on a link to the latest Document version.
 
@@ -1557,7 +1764,7 @@ The historical Gate Review must continue to show that URS Rev 03 was the revisio
 
 MOC-007 provides the traceability from the original approved state to the subsequent approved state.
 
-At later Gates and at Project/Package Closure, applicable Criteria may verify that relevant MOCs have been implemented, closed or formally transferred.
+At later Gates and at Project/Package Closure, applicable Deliverable acceptance requirements may verify that relevant MOCs have been implemented, closed or formally transferred.
 
 ---
 
@@ -1574,8 +1781,7 @@ The Report should contain at minimum:
 - Gate Review ID;
 - review date;
 - Gate Decision;
-- Gate Criteria and final statuses;
-- Deliverables and final statuses;
+- Deliverables, acceptance requirements and final statuses;
 - accepted open Actions;
 - controlled Documents and exact revisions/versions reviewed;
 - applicable baseline references;
@@ -1621,6 +1827,14 @@ The final signed/approved Report should itself be treated as a controlled record
 
 If an approved or rejected Gate needs to be formally reconsidered, the application should eventually support reopening the Gate or initiating a new Gate Review cycle.
 
+While a Project or Package Gate has an active Review Cycle in `Submitted for Approval`, a Project Owner may withdraw that cycle even when one or more Approvers have already responded, provided the Gate has not reached final approval and the related Stage has not progressed. Every withdrawal requires a reason containing non-whitespace text and must be attributed to the authenticated Project Owner.
+
+Withdrawal must be transactional with approval responses so that withdrawal and final approval cannot both succeed. Changing the Review Cycle status to `Withdrawn` cancels all remaining approval authority, prevents later Approval Levels from activating and returns the live Gate to `Not Submitted` for editing. Resubmission must create a new Review Cycle; approvals from the withdrawn cycle must not be carried forward or count toward Stage progression.
+
+A withdrawn Review Cycle remains a complete historical governance record. Its frozen evidence, Approver snapshots, invitation and delivery history, responses, response timestamps, comments and authenticated identity evidence must remain unchanged. The history must clearly identify the cycle as `Withdrawn`, record who withdrew it, when and why, and explain that any approvals shown are historical and no longer effective for Gate approval or Stage progression.
+
+Project Gates and Package Gates must apply the same withdrawal rules. PostgreSQL is the source of truth for the controlled withdrawal operation.
+
 Previous Gate Review Records and signatures must remain preserved.
 
 A new review must not overwrite the historical Decision.
@@ -1649,25 +1863,27 @@ The detailed reopening workflow should be developed incrementally.
 
 Gate Templates may define default:
 
-- Gate Criteria;
-- Deliverables;
+- Deliverables and their acceptance requirements;
 - required approval roles.
 
 When a Project is created, these defaults should be instantiated for that Project.
 
 The PM should be able to tailor:
 
-- Gate Criteria;
-- Deliverables;
+- Deliverables and their acceptance requirements;
 - required Approvers
 
 to the Project's actual governance structure, subject to appropriate permissions.
 
-When master Gate Templates gain new default Criteria or Deliverables, the implementation should add only missing default items to existing live Gates. It must not recreate Gates or change their stable IDs; overwrite user-created or user-edited Criteria or Deliverables; duplicate existing default items; reset Completed or Not Applicable statuses; alter existing Approvers, approval levels, Gate Actions or Review Cycles; or modify frozen historical Review Cycle snapshots. New defaults must not silently modify active submitted Review Cycles and must preserve existing Stage transitions and Gate approval logic.
+When master Gate Templates gain new default Deliverables, the implementation should add only missing default items to existing live Gates. It must not recreate Gates or change their stable IDs; overwrite user-created Deliverables; duplicate existing default items; reset Completed or Not Applicable statuses; alter existing Approvers, approval levels, Gate Actions or Review Cycles; or modify frozen historical Review Cycle snapshots. New defaults must not silently modify active submitted Review Cycles and must preserve existing Stage transitions and Gate approval logic.
 
 For an active submitted or formally approved Gate, new template defaults must not alter the submitted or approved Review Cycle, frozen evidence, approval responses or historical Decision. The new defaults should be assessed only in a future eligible Review Cycle if the Gate is subsequently reopened or otherwise returned to preparation under the existing governance workflow.
 
 Project-specific changes must not modify the master Gate Template.
+
+The Project Applicability Review and individual Gate pages must operate on these same instantiated Deliverable records. They must not maintain parallel applicability registers.
+
+Before Package Definition Complete may be submitted, every new Package-level Not Applicable decision must have a justification. Applicable Deliverables remain subject to the normal completion requirements for that Gate or later Gates; Not Applicable items are excluded without changing their recorded completion status.
 
 This follows the general principle:
 
@@ -1685,6 +1901,8 @@ Gate Template
 # 16. Deliverables
 
 Deliverables are core governance entities.
+
+The Deliverable description stores legacy acceptance-requirement metadata. Existing descriptions and frozen historical evidence must be preserved, but the description is not displayed or editable in the active Deliverable UI. Default methodology Deliverables retain their non-empty stored requirements and submission validation. Custom Deliverables may use an empty description and must not be blocked from creation, editing or Gate submission because acceptance requirements are absent. A Deliverable may be marked Completed only when the responsible user has determined that the required outcome has been achieved.
 
 A Deliverable should eventually support:
 
@@ -3282,7 +3500,7 @@ The exact hosting platform should be selected later.
 
 ## 46.2 Structured Data Storage
 
-Structured application data should be stored persistently in a suitable production database.
+PostgreSQL is the authoritative source of truth for operational structured application data. Operational records must not be persisted in parallel JSON files or depend on the local filesystem of the application runtime.
 
 This includes:
 
@@ -3294,7 +3512,6 @@ This includes:
 * Resource Plans;
 * Governance Tiers;
 * Gates;
-* Gate Criteria;
 * Deliverables;
 * Actions;
 * Risks;
@@ -3309,6 +3526,7 @@ This includes:
 * permissions configuration;
 * Document metadata and SharePoint references;
 * audit/history information.
+* Deliverable applicability decisions, justifications and change history.
 
 Application data must not depend on temporary application memory or the local filesystem of the application runtime.
 
@@ -3521,7 +3739,6 @@ Templates may define:
 * Package lifecycle;
 * Stage applicability;
 * Gates;
-* Gate Criteria;
 * Deliverables;
 * Governance Tiers;
 * SharePoint structure;
@@ -3616,15 +3833,9 @@ An important event or target date.
 
 A governance Decision authorizing progression.
 
-## Gate Criterion
-
-A condition that must be satisfied before a Gate can be passed.
-
 ## Deliverable
 
-Something that must be produced or achieved.
-
-Deliverables may provide evidence that one or more Gate Criteria have been satisfied.
+Something that must be produced or achieved. Every Deliverable has acceptance requirements that must be satisfied before it may be marked Completed.
 
 ## Document
 

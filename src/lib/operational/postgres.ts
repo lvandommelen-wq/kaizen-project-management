@@ -3,7 +3,20 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 import { getOperationalPool } from "../database";
-import type { DeliverableInput } from "../deliverables";
+import type { Deliverable, DeliverableInput } from "../deliverables";
+import {
+  digestGateReviewOtp,
+  gateReviewOtpHourlyLimit,
+  gateReviewOtpLifetimeMinutes,
+  gateReviewOtpMaximumAttempts,
+  gateReviewOtpResendSeconds,
+  gateReviewSessionLifetimeMinutes,
+  generateGateReviewOtp,
+  generateGateReviewSessionToken,
+  hashGateReviewSessionToken,
+  maskGateReviewEmail,
+  verifyGateReviewOtpDigest,
+} from "../gate-review-otp";
 import {
   createGateReviewCycle,
   createGates,
@@ -13,14 +26,17 @@ import {
   recordGateReviewResponse,
   withdrawGateReviewCycle,
   type Gate,
+  type Applicability,
+  type ApplicabilityMatrixSnapshot,
   type GateApproverInput,
-  type GateCriterionInput,
   type GateReviewActorSnapshot,
   type GateReviewInvitationAttemptResult,
   type GateReviewResponseInput,
   type GateReviewResponseResult,
   type GateSubmissionResult,
   type GateWithdrawalResult,
+  type HistoricalApplicability,
+  type VerifiedApproverUser,
 } from "../gates";
 import {
   getProjectGateTemplates,
@@ -46,6 +62,14 @@ import type {
 } from "../projects";
 import type { CurrentUser } from "../current-user";
 import { insertAuditEvent } from "../audit";
+import {
+  buildGateMatrixReviewState,
+  getMatrixReviewSubmissionIssues,
+  resolveMatrixReviewTarget,
+  type GateMatrixReviewState,
+  type MatrixReviewConfirmation,
+  type MatrixReviewTarget,
+} from "../matrix-reviews";
 import {
   loadDeliverable,
   loadGate,
@@ -102,6 +126,32 @@ export type AuditEvent = {
   metadata: Record<string, unknown>;
 };
 
+export type ApplicabilityItemType = "deliverable";
+type LegacyApplicabilityItemType = "criterion" | ApplicabilityItemType;
+
+export type ApplicabilityMutationInput = {
+  projectId: string;
+  packageId: string | null;
+  gateId: string;
+  itemType: ApplicabilityItemType;
+  itemId: string;
+  applicability: Applicability;
+  justification: string;
+};
+
+export type ApplicabilityChange = {
+  id: string;
+  gateId: string;
+  itemType: LegacyApplicabilityItemType;
+  itemId: string;
+  previousApplicability: HistoricalApplicability | null;
+  applicability: HistoricalApplicability;
+  justification: string | null;
+  changeReason: string | null;
+  changedAt: string;
+  changedByDisplayName: string;
+};
+
 const projectStageOrder = [
   "initiation",
   "definition_design",
@@ -133,10 +183,10 @@ async function withOperationalClient<T>(
   try {
     const schema = await client.query(
       `SELECT 1 FROM identity_schema_migration
-       WHERE name = '007_project_authorization_audit.sql'`,
+       WHERE name = '010_gate_review_email_otp.sql'`,
     );
     if (schema.rowCount !== 1) {
-      throw new Error("Operational PostgreSQL migration 007 has not been applied.");
+      throw new Error("Operational PostgreSQL migration 010 has not been applied.");
     }
     return await operation(client);
   } finally {
@@ -188,6 +238,21 @@ function packageStageLabel(stageId: string) {
     execution: "Execution",
     closure: "Closure",
   }[stageId] ?? stageId;
+}
+
+function getMatrixReviewTarget(
+  scope: Scope,
+  gateStageId: string,
+  validationRequired: boolean,
+): MatrixReviewTarget {
+  const activeStageIds: string[] = scope.packageId
+    ? [...packageStageOrder]
+    : [...projectLifecycle(validationRequired)];
+  return resolveMatrixReviewTarget(
+    gateStageId,
+    activeStageIds,
+    scope.packageId ? packageStageLabel : projectStageLabel,
+  );
 }
 
 export async function getProjects(userId?: string) {
@@ -419,21 +484,6 @@ async function insertGatesAndDefaultDeliverables<StageId extends string>(
         gate.status,
       ],
     );
-    for (const [criterionIndex, criterion] of gate.criteria.entries()) {
-      await client.query(
-        `INSERT INTO gate_criterion (
-           id, gate_id, sequence, template_id, description, status
-         ) VALUES ($1, $2, $3, $4, $5, $6)`,
-        [
-          criterion.id,
-          gate.id,
-          criterionIndex + 1,
-          criterion.templateId,
-          criterion.description,
-          criterion.status,
-        ],
-      );
-    }
     for (const [approverIndex, approver] of gate.approvers.entries()) {
       await client.query(
         `INSERT INTO gate_approver (
@@ -460,9 +510,10 @@ async function insertGatesAndDefaultDeliverables<StageId extends string>(
         `INSERT INTO deliverable (
            id, template_id, template_version, project_id, package_id, gate_id,
            sequence, title, description, status, stage_id, scope_level,
-           created_at, updated_at
+           created_at, updated_at, applicability, applicability_origin,
+           applicability_locked
          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'not_started',
-           $10, $11, $12, $12)`,
+            $10, $11, $12, $12, $13, 'template', $14)`,
         [
           deliverableId,
           definition.id,
@@ -476,34 +527,11 @@ async function insertGatesAndDefaultDeliverables<StageId extends string>(
           gate.stageId,
           scope.packageId ? "package" : "project",
           now,
+          "applicable",
+          definition.applicabilityLocked ?? false,
         ],
       );
-      const criterionIds = (definition.criterionIds ?? []).flatMap((templateId) => {
-        const criterion = gate.criteria.find((candidate) => candidate.templateId === templateId);
-        return criterion ? [criterion.id] : [];
-      });
-      await replaceDeliverableCriterionLinks(client, deliverableId, gate.id, criterionIds);
     }
-  }
-}
-
-async function replaceDeliverableCriterionLinks(
-  client: PoolClient,
-  deliverableId: string,
-  gateId: string,
-  criterionIds: string[],
-) {
-  await client.query(
-    "DELETE FROM deliverable_criterion WHERE deliverable_id = $1",
-    [deliverableId],
-  );
-  for (const [index, criterionId] of [...new Set(criterionIds)].entries()) {
-    await client.query(
-      `INSERT INTO deliverable_criterion (
-         deliverable_id, criterion_id, gate_id, sequence
-       ) VALUES ($1, $2, $3, $4)`,
-      [deliverableId, criterionId, gateId, index + 1],
-    );
   }
 }
 
@@ -581,12 +609,12 @@ export async function createDeliverable(input: DeliverableInput) {
     const id = randomUUID();
     const now = new Date().toISOString();
     await client.query(
-      `INSERT INTO deliverable (
+        `INSERT INTO deliverable (
          id, template_id, template_version, project_id, package_id, gate_id,
          sequence, title, description, status, stage_id, scope_level,
-         created_at, updated_at
+          created_at, updated_at, applicability, applicability_origin
        ) VALUES ($1, NULL, NULL, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-         $11, $11)`,
+           $11, $11, 'applicable', 'legacy')`,
       [
         id,
         input.projectId,
@@ -600,12 +628,6 @@ export async function createDeliverable(input: DeliverableInput) {
         input.scopeLevel,
         now,
       ],
-    );
-    await replaceDeliverableCriterionLinks(
-      client,
-      id,
-      input.gateId,
-      input.criterionIds,
     );
     await touchScope(client, scope, now);
     const deliverable = await loadDeliverable(client, id);
@@ -638,24 +660,17 @@ export async function updateDeliverable(
     }
     const now = new Date().toISOString();
     await client.query(
-      `UPDATE deliverable SET title = $2, description = $3, status = $4,
-         stage_id = $5, scope_level = $6, updated_at = $7
+      `UPDATE deliverable SET title = $2, status = $3,
+         stage_id = $4, scope_level = $5, updated_at = $6
        WHERE id = $1`,
       [
         deliverableId,
         input.title,
-        input.description,
         input.status,
         input.stageId,
         input.scopeLevel,
         now,
       ],
-    );
-    await replaceDeliverableCriterionLinks(
-      client,
-      deliverableId,
-      input.gateId,
-      input.criterionIds,
     );
     await touchScope(client, scope, now);
     return loadDeliverable(client, deliverableId);
@@ -669,6 +684,9 @@ export async function deleteDeliverable(
   return withOperationalTransaction(async (client) => {
     const gate = await lockScopeGate(client, context, context.gateId);
     if (!gate || !isGateInPreparation(gate)) return false;
+    if (await itemHasReviewEvidence(client, context, "deliverable", deliverableId)) {
+      return false;
+    }
     const result = await client.query(
       `DELETE FROM deliverable
        WHERE id = $1 AND project_id = $2
@@ -679,24 +697,6 @@ export async function deleteDeliverable(
     if (result.rowCount === 0) return false;
     await touchScope(client, context, new Date().toISOString());
     return true;
-  });
-}
-
-export async function removeCriterionFromDeliverables(criterionId: string) {
-  return withOperationalTransaction(async (client) => {
-    const result = await client.query(
-      `DELETE FROM deliverable_criterion
-       WHERE criterion_id = $1
-       RETURNING deliverable_id`,
-      [criterionId],
-    );
-    if (result.rowCount && result.rowCount > 0) {
-      await client.query(
-        `UPDATE deliverable SET updated_at = now()
-         WHERE id = ANY($1::text[])`,
-        [result.rows.map((row) => row.deliverable_id)],
-      );
-    }
   });
 }
 
@@ -730,13 +730,7 @@ async function synchronizeGateDefaultDeliverables<StageId extends string>(
   gate: Gate,
   template: GovernanceGateTemplate<StageId>,
 ) {
-  const templateIds = template.deliverables.map((definition) => definition.id);
-  await client.query(
-    `DELETE FROM deliverable
-     WHERE gate_id = $1 AND template_id IS NOT NULL
-       AND NOT (template_id = ANY($2::text[]))`,
-    [gate.id, templateIds],
-  );
+  if (!isGateInPreparation(gate)) return;
   const maximumResult = await client.query(
     "SELECT coalesce(max(sequence), 0) AS sequence FROM deliverable WHERE gate_id = $1",
     [gate.id],
@@ -745,17 +739,21 @@ async function synchronizeGateDefaultDeliverables<StageId extends string>(
   const now = new Date().toISOString();
   for (const definition of template.deliverables) {
     const id = `${gate.id}:deliverable:${definition.id}`;
-    const inserted = await client.query(
+    await client.query(
       `INSERT INTO deliverable (
          id, template_id, template_version, project_id, package_id, gate_id,
          sequence, title, description, status, stage_id, scope_level,
-         created_at, updated_at
+          created_at, updated_at, applicability, applicability_origin,
+          applicability_locked
        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'not_started',
-         $10, $11, $12, $12)
-       ON CONFLICT (gate_id, template_id) WHERE template_id IS NOT NULL
-       DO UPDATE SET template_version = EXCLUDED.template_version,
-         updated_at = EXCLUDED.updated_at
-       RETURNING id`,
+           $10, $11, $12, $12, $13, 'template', $14)
+        ON CONFLICT (gate_id, template_id) WHERE template_id IS NOT NULL
+        DO UPDATE SET template_version = EXCLUDED.template_version,
+          title = EXCLUDED.title,
+          description = EXCLUDED.description,
+          applicability_locked = EXCLUDED.applicability_locked,
+          updated_at = EXCLUDED.updated_at
+       `,
       [
         id,
         definition.id,
@@ -769,22 +767,474 @@ async function synchronizeGateDefaultDeliverables<StageId extends string>(
         gate.stageId,
         scope.packageId ? "package" : "project",
         now,
+        "applicable",
+        definition.applicabilityLocked ?? false,
       ],
-    );
-    const storedId = String(inserted.rows[0]?.id);
-    const current = await loadDeliverable(client, storedId);
-    const defaultCriterionIds = (definition.criterionIds ?? []).flatMap((templateId) => {
-      const criterion = gate.criteria.find((candidate) => candidate.templateId === templateId);
-      return criterion ? [criterion.id] : [];
-    });
-    await replaceDeliverableCriterionLinks(
-      client,
-      storedId,
-      gate.id,
-      [...new Set([...(current?.criterionIds ?? []), ...defaultCriterionIds])],
     );
     nextSequence += 1;
   }
+
+  await client.query(
+    "UPDATE gate SET template_version = greatest(template_version, $2) WHERE id = $1",
+    [gate.id, template.templateVersion],
+  );
+}
+
+export async function getApplicabilityReview(projectId: string, packageId: string | null) {
+  return withOperationalTransaction(async (client) => {
+    const project = await loadProject(client, projectId);
+    const entity = packageId ? await loadPackage(client, projectId, packageId) : project;
+    if (!project || !entity) return null;
+    const gates = packageId ? (entity as ProjectPackage).gates : project.gates;
+    const templates = packageId ? packageGateTemplates : getProjectGateTemplates(project.validationRequired);
+
+    for (const gate of gates) {
+      if (!isGateInPreparation(gate)) continue;
+      const template = templates.find((candidate) => candidate.stageId === gate.stageId);
+      if (template) await synchronizeGateDefaultDeliverables(client, { projectId, packageId }, gate, template);
+    }
+
+    const refreshed = packageId
+      ? await loadPackage(client, projectId, packageId)
+      : await loadProject(client, projectId);
+    if (!refreshed) return null;
+    const refreshedGates = packageId ? (refreshed as ProjectPackage).gates : (refreshed as Project).gates;
+    const reviewGates: Array<{
+      gate: Gate;
+      stageLabel: string;
+      deliverables: Deliverable[];
+    }> = [];
+    for (const gate of refreshedGates) {
+      reviewGates.push({
+        gate,
+        stageLabel: packageId ? packageStageLabel(gate.stageId) : projectStageLabel(gate.stageId),
+        deliverables: await loadGateDeliverables(client, projectId, packageId, gate.id),
+      });
+    }
+    const changeRows = await client.query(
+      `SELECT id, gate_id, item_type, item_id, previous_applicability,
+         applicability, justification, change_reason, changed_at,
+         changed_by_display_name
+       FROM applicability_change
+       WHERE project_id = $1 AND package_id IS NOT DISTINCT FROM $2::text
+       ORDER BY changed_at DESC, id DESC`,
+      [projectId, packageId],
+    );
+    const changes: ApplicabilityChange[] = changeRows.rows.map((row) => ({
+      id: String(row.id),
+      gateId: String(row.gate_id),
+      itemType: String(row.item_type) as LegacyApplicabilityItemType,
+      itemId: String(row.item_id),
+      previousApplicability: row.previous_applicability == null
+        ? null
+        : String(row.previous_applicability) as HistoricalApplicability,
+      applicability: String(row.applicability) as HistoricalApplicability,
+      justification: row.justification == null ? null : String(row.justification),
+      changeReason: row.change_reason == null ? null : String(row.change_reason),
+      changedAt: row.changed_at instanceof Date
+        ? row.changed_at.toISOString()
+        : new Date(String(row.changed_at)).toISOString(),
+      changedByDisplayName: String(row.changed_by_display_name),
+    }));
+    const methodologyApproved = refreshedGates.some((gate) =>
+      gate.stageId === (packageId ? "definition" : "initiation") &&
+      gate.reviewCycles.some((cycle) => cycle.status === "approved" || cycle.status === "approved_with_actions"));
+    const methodologyAwaitingApproval = refreshedGates.some((gate) =>
+      gate.stageId === (packageId ? "definition" : "initiation") &&
+      gate.reviewCycles.some((cycle) => cycle.status === "awaiting_approval"));
+    return {
+      project,
+      entity: refreshed,
+      gates: reviewGates,
+      changes,
+      methodologyApproved,
+      methodologyAwaitingApproval,
+    };
+  });
+}
+
+function buildApplicabilityMatrix(
+  scopeId: string,
+  packageId: string | null,
+  gates: Array<{
+    gate: Gate;
+    stageLabel: string;
+    deliverables: Deliverable[];
+  }>,
+  generatedAt: string,
+): ApplicabilityMatrixSnapshot {
+  return {
+    scopeLevel: packageId ? "package" : "project",
+    scopeId,
+    generatedAt,
+    gates: gates.map(({ gate, stageLabel, deliverables }) => ({
+      stageId: gate.stageId,
+      stageLabel,
+      gateId: gate.id,
+      gateName: gate.name,
+      items: deliverables.map((deliverable) => ({
+          itemType: "deliverable" as const,
+          itemId: deliverable.id,
+          templateId: deliverable.templateId,
+          source: deliverable.templateId ? "default" as const : "custom" as const,
+          title: deliverable.title,
+          description: deliverable.description,
+          applicability: deliverable.applicability,
+          justification: deliverable.applicabilityJustification,
+          decidedAt: deliverable.applicabilityDecidedAt,
+          decidedBy: deliverable.applicabilityDecidedByDisplayName,
+        })),
+    })),
+  };
+}
+
+async function lockScopeMatrixGates(client: PoolClient, scope: Scope) {
+  await client.query(
+    `SELECT id
+     FROM gate
+     WHERE project_id = $1 AND package_id IS NOT DISTINCT FROM $2::text
+     ORDER BY sequence
+     FOR UPDATE`,
+    [scope.projectId, scope.packageId],
+  );
+}
+
+async function loadStoredMatrixReviewConfirmation(
+  client: PoolClient,
+  gateId: string,
+): Promise<Omit<MatrixReviewConfirmation, "targetStageLabel" | "applicableCount" | "notApplicableCount"> | null> {
+  const result = await client.query(
+    `SELECT gate_id, review_scope, target_stage_id, matrix_fingerprint, status,
+            confirmed_at, confirmed_by_user_id, confirmed_by_display_name,
+            confirmed_by_email
+     FROM gate_matrix_review_confirmation
+     WHERE gate_id = $1`,
+    [gateId],
+  );
+  const row = result.rows[0];
+  if (!row) return null;
+  return {
+    gateId: String(row.gate_id),
+    reviewScope: String(row.review_scope) as MatrixReviewConfirmation["reviewScope"],
+    targetStageId: row.target_stage_id == null ? null : String(row.target_stage_id),
+    reviewer: {
+      userId: row.confirmed_by_user_id == null ? null : String(row.confirmed_by_user_id),
+      displayName: String(row.confirmed_by_display_name),
+      email: String(row.confirmed_by_email),
+      authenticationMethod: "microsoft_entra",
+    },
+    confirmedAt: row.confirmed_at instanceof Date
+      ? row.confirmed_at.toISOString()
+      : new Date(String(row.confirmed_at)).toISOString(),
+    status: "confirmed",
+    matrixFingerprint: String(row.matrix_fingerprint),
+  };
+}
+
+async function loadGateMatrixReviewContext(
+  client: PoolClient,
+  scope: Scope,
+  gateId: string,
+): Promise<{
+  matrix: ApplicabilityMatrixSnapshot;
+  state: GateMatrixReviewState;
+} | null> {
+  const project = await loadProject(client, scope.projectId);
+  const entity = scope.packageId
+    ? await loadPackage(client, scope.projectId, scope.packageId)
+    : project;
+  const gate = await loadGate(client, scope.projectId, scope.packageId, gateId);
+  if (!project || !entity || !gate) return null;
+
+  const review = await getApplicabilityReview(scope.projectId, scope.packageId);
+  if (!review) return null;
+  const target = getMatrixReviewTarget(scope, gate.stageId, project.validationRequired);
+  const activeStageIds = new Set(target.activeStageIds);
+  const activeGates = review.gates.filter(({ gate: reviewGate }) =>
+    activeStageIds.has(reviewGate.stageId));
+  const matrix = buildApplicabilityMatrix(
+    scope.packageId ?? scope.projectId,
+    scope.packageId,
+    activeGates,
+    new Date().toISOString(),
+  );
+  const confirmation = await loadStoredMatrixReviewConfirmation(client, gateId);
+  return {
+    matrix,
+    state: buildGateMatrixReviewState(gateId, matrix, target, confirmation),
+  };
+}
+
+export async function getGateMatrixReview(
+  projectId: string,
+  packageId: string | null,
+  gateId: string,
+) {
+  return withOperationalTransaction((client) =>
+    loadGateMatrixReviewContext(client, { projectId, packageId }, gateId));
+}
+
+export async function confirmGateMatrixReview(
+  projectId: string,
+  packageId: string | null,
+  gateId: string,
+  actor: CurrentUser,
+) {
+  return withOperationalTransaction(async (client) => {
+    const scope = { projectId, packageId };
+    const gate = await lockScopeGate(client, scope, gateId);
+    const project = await loadProject(client, projectId);
+    const entity = packageId ? await loadPackage(client, projectId, packageId) : project;
+    if (!gate || !project || !entity) return null;
+    if (!isGateInPreparation(gate)) {
+      throw new Error("The Applicability Matrix can only be confirmed while the Gate is in preparation.");
+    }
+    if (gate.stageId !== entity.currentStage) {
+      throw new Error("Only the current Gate Applicability Matrix review can be confirmed.");
+    }
+
+    await lockScopeMatrixGates(client, scope);
+    const context = await loadGateMatrixReviewContext(client, scope, gateId);
+    if (!context) return null;
+    const confirmedAt = new Date().toISOString();
+    await client.query(
+      `INSERT INTO gate_matrix_review_confirmation (
+         gate_id, project_id, package_id, scope_level, review_scope,
+         target_stage_id, matrix_fingerprint, status, confirmed_at,
+         confirmed_by_user_id, confirmed_by_display_name, confirmed_by_email
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'confirmed', $8, $9, $10, $11)
+       ON CONFLICT (gate_id) DO UPDATE SET
+         review_scope = EXCLUDED.review_scope,
+         target_stage_id = EXCLUDED.target_stage_id,
+         matrix_fingerprint = EXCLUDED.matrix_fingerprint,
+         status = EXCLUDED.status,
+         confirmed_at = EXCLUDED.confirmed_at,
+         confirmed_by_user_id = EXCLUDED.confirmed_by_user_id,
+         confirmed_by_display_name = EXCLUDED.confirmed_by_display_name,
+         confirmed_by_email = EXCLUDED.confirmed_by_email`,
+      [
+        gateId,
+        projectId,
+        packageId,
+        packageId ? "package" : "project",
+        context.state.target.reviewScope,
+        context.state.target.targetStageId,
+        context.state.matrixFingerprint,
+        confirmedAt,
+        actor.id,
+        actor.displayName,
+        actor.email,
+      ],
+    );
+    await touchScope(client, scope, confirmedAt);
+
+    return buildGateMatrixReviewState(gateId, context.matrix, context.state.target, {
+      gateId,
+      reviewScope: context.state.target.reviewScope,
+      targetStageId: context.state.target.targetStageId,
+      reviewer: {
+        userId: actor.id,
+        displayName: actor.displayName,
+        email: actor.email,
+        authenticationMethod: "microsoft_entra",
+      },
+      confirmedAt,
+      status: "confirmed",
+      matrixFingerprint: context.state.matrixFingerprint,
+    });
+  });
+}
+
+async function scopeHasActiveMethodologyReview(client: PoolClient, scope: Scope) {
+  const result = await client.query(
+    `SELECT 1
+     FROM gate
+     JOIN gate_review_cycle AS cycle ON cycle.gate_id = gate.id
+     WHERE gate.project_id = $1
+       AND gate.package_id IS NOT DISTINCT FROM $2::text
+       AND gate.stage_id = $3
+       AND cycle.status = 'awaiting_approval'
+     LIMIT 1`,
+    [scope.projectId, scope.packageId, scope.packageId ? "definition" : "initiation"],
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+export async function updateApplicabilityItem(input: ApplicabilityMutationInput, actor: CurrentUser) {
+  return withOperationalTransaction(async (client) => {
+    const scope = { projectId: input.projectId, packageId: input.packageId };
+    const gate = await lockScopeGate(client, scope, input.gateId);
+    if (!gate) return null;
+    if (gate.status === "submitted_for_approval" || await scopeHasActiveMethodologyReview(client, scope)) {
+      throw new Error("Applicability cannot be changed while the relevant Review Cycle is awaiting approval.");
+    }
+    if (input.applicability === "not_applicable" && !input.justification.trim()) {
+      throw new Error("A justification is required for Not Applicable.");
+    }
+
+    const locked = await client.query(
+      `SELECT id, template_id, status, applicability, applicability_locked
+       FROM deliverable WHERE id = $1 AND gate_id = $2 FOR UPDATE`,
+      [input.itemId, input.gateId],
+    );
+    const row = locked.rows[0];
+    if (!row) return null;
+    if (row.applicability_locked && input.applicability !== "applicable") {
+      throw new Error("This mandatory methodology control must remain Applicable.");
+    }
+    const now = new Date().toISOString();
+    const completion = String(row.status);
+    await client.query(
+      `UPDATE deliverable
+       SET applicability = $3, applicability_justification = $4,
+             applicability_decided_at = $5, applicability_decided_by_user_id = $6,
+             applicability_decided_by_display_name = $7, applicability_origin = 'user',
+             updated_at = $5
+       WHERE id = $1 AND gate_id = $2`,
+      [
+        input.itemId,
+        input.gateId,
+        input.applicability,
+        input.applicability === "not_applicable" ? input.justification.trim() : null,
+        now,
+        actor.id,
+        actor.displayName,
+      ],
+    );
+    if (row.applicability !== input.applicability) {
+      await client.query(
+        `INSERT INTO applicability_change (
+           project_id, package_id, gate_id, item_type, item_id, template_id,
+           previous_applicability, applicability, justification, change_reason,
+           previous_completion_status, completion_status, changed_at,
+           changed_by_user_id, changed_by_display_name, changed_by_email
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, $10, $11,
+            $12, $13, $14, $15)`,
+        [
+          input.projectId, input.packageId, input.gateId, input.itemType,
+          input.itemId, row.template_id, row.applicability, input.applicability,
+          input.applicability === "not_applicable" ? input.justification.trim() : null,
+          row.status, completion, now, actor.id, actor.displayName, actor.email,
+        ],
+      );
+    }
+    await touchScope(client, scope, now);
+    return true;
+  });
+}
+
+export async function createApplicabilityItem(input: {
+  projectId: string;
+  packageId: string | null;
+  gateId: string;
+  itemType: ApplicabilityItemType;
+  title: string;
+}, actor: CurrentUser) {
+  return withOperationalTransaction(async (client) => {
+    const scope = { projectId: input.projectId, packageId: input.packageId };
+    const gate = await lockScopeGate(client, scope, input.gateId);
+    if (!gate) return null;
+    if (gate.status === "submitted_for_approval" || await scopeHasActiveMethodologyReview(client, scope)) {
+      throw new Error("Items cannot be added while the relevant Review Cycle is awaiting approval.");
+    }
+    const title = input.title.trim();
+    if (!title) {
+      throw new Error("A Deliverable title is required.");
+    }
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    await client.query(
+        `INSERT INTO deliverable (
+           id, project_id, package_id, gate_id, sequence, title, description,
+           status, stage_id, scope_level, created_at, updated_at, applicability,
+           applicability_decided_at, applicability_decided_by_user_id,
+           applicability_decided_by_display_name, applicability_origin
+         ) SELECT $1, $2, $3, $4, coalesce(max(sequence), 0) + 1, $5, '',
+           'not_started', $6, $7, $8, $8, 'applicable', $8, $9, $10, 'user'
+           FROM deliverable WHERE gate_id = $4`,
+        [id, input.projectId, input.packageId, input.gateId, title,
+          gate.stageId, input.packageId ? "package" : "project", now, actor.id, actor.displayName],
+    );
+    await client.query(
+      `INSERT INTO applicability_change (
+         project_id, package_id, gate_id, item_type, item_id, previous_applicability,
+         applicability, change_reason, completion_status, changed_at,
+         changed_by_user_id, changed_by_display_name, changed_by_email
+        ) VALUES ($1, $2, $3, $4, $5, NULL, 'applicable', NULL, $6, $7, $8, $9, $10)`,
+      [input.projectId, input.packageId, input.gateId, input.itemType, id,
+        "not_started",
+        now, actor.id, actor.displayName, actor.email],
+    );
+    await touchScope(client, scope, now);
+    return id;
+  });
+}
+
+export async function deleteApplicabilityItem(input: {
+  projectId: string;
+  packageId: string | null;
+  gateId: string;
+  itemType: ApplicabilityItemType;
+  itemId: string;
+}) {
+  return withOperationalTransaction(async (client) => {
+    const scope = { projectId: input.projectId, packageId: input.packageId };
+    const gate = await lockScopeGate(client, scope, input.gateId);
+    if (!gate || gate.status === "submitted_for_approval" || await scopeHasActiveMethodologyReview(client, scope)) return false;
+    if (await itemHasReviewEvidence(client, scope, input.itemType, input.itemId)) {
+      return false;
+    }
+    const result = await client.query(
+      `DELETE FROM deliverable WHERE id = $1 AND gate_id = $2 AND template_id IS NULL`,
+      [input.itemId, input.gateId],
+    );
+    if ((result.rowCount ?? 0) > 0) await touchScope(client, scope, new Date().toISOString());
+    return (result.rowCount ?? 0) > 0;
+  });
+}
+
+async function itemHasReviewEvidence(
+  client: PoolClient,
+  scope: Scope,
+  itemType: LegacyApplicabilityItemType,
+  itemId: string,
+) {
+  const history = await client.query(
+      `SELECT 1 FROM gate_review_cycle AS cycle
+       JOIN gate ON gate.id = cycle.gate_id
+       WHERE gate.project_id = $1
+         AND gate.package_id IS NOT DISTINCT FROM $2::text
+         AND (
+           EXISTS (
+             SELECT 1
+             FROM jsonb_array_elements(
+               coalesce(cycle.frozen_evidence -> $4::text, '[]'::jsonb)
+             ) AS frozen_item
+             WHERE frozen_item ->> $5::text = $3
+           )
+           OR EXISTS (
+             SELECT 1
+             FROM jsonb_array_elements(coalesce(
+               cycle.frozen_evidence #> '{applicabilityMatrix,gates}',
+               '[]'::jsonb
+             )) AS matrix_gate
+             CROSS JOIN LATERAL jsonb_array_elements(coalesce(
+               matrix_gate -> 'items',
+               '[]'::jsonb
+             )) AS matrix_item
+             WHERE matrix_item ->> 'itemId' = $3
+           )
+         )
+       LIMIT 1`,
+      [
+        scope.projectId,
+        scope.packageId,
+        itemId,
+        itemType === "criterion" ? "criteria" : "deliverables",
+        itemType === "criterion" ? "criterionId" : "deliverableId",
+      ],
+    );
+  return (history.rowCount ?? 0) > 0;
 }
 
 export async function deleteDeliverablesForProject(projectId: string) {
@@ -1068,31 +1518,19 @@ async function createGateApprover(
        FROM gate_approver WHERE gate_id = $1`,
       [gateId],
     );
-    const expectedProviderTenantId = input.expectedProviderObjectId
-      ? process.env.MICROSOFT_TENANT_ID?.trim().toLowerCase() ?? null
-      : null;
-    if (input.expectedProviderObjectId && !expectedProviderTenantId) {
-      throw new Error("MICROSOFT_TENANT_ID is required for Gate Approver assignment.");
-    }
-    const assignedUserId = expectedProviderTenantId && input.expectedProviderObjectId
-      ? await resolveApproverUserId(
-          client,
-          expectedProviderTenantId,
-          input.expectedProviderObjectId,
-        )
-      : null;
     const approver = {
       id: randomUUID(),
       ...input,
-      assignedUserId,
-      expectedProviderTenantId,
+      assignedUserId: null,
+      expectedProviderTenantId: null,
+      expectedProviderObjectId: null,
     };
     await client.query(
       `INSERT INTO gate_approver (
          id, gate_id, sequence, name, email, role_function, approval_role,
          approval_level, assigned_user_id, expected_provider_tenant_id,
-         expected_provider_object_id
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+         expected_provider_object_id, organization_name
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
       [
         approver.id,
         gateId,
@@ -1105,6 +1543,7 @@ async function createGateApprover(
         approver.assignedUserId,
         approver.expectedProviderTenantId,
         approver.expectedProviderObjectId,
+        approver.organizationName,
       ],
     );
     await touchScope(client, scope, new Date().toISOString());
@@ -1121,23 +1560,9 @@ async function updateGateApprover(
   return withOperationalTransaction(async (client) => {
     const gate = await lockScopeGate(client, scope, gateId);
     if (!gate || !isGateInPreparation(gate)) return null;
-    const expectedProviderTenantId = input.expectedProviderObjectId
-      ? process.env.MICROSOFT_TENANT_ID?.trim().toLowerCase() ?? null
-      : null;
-    if (input.expectedProviderObjectId && !expectedProviderTenantId) {
-      throw new Error("MICROSOFT_TENANT_ID is required for Gate Approver assignment.");
-    }
-    const assignedUserId = expectedProviderTenantId && input.expectedProviderObjectId
-      ? await resolveApproverUserId(
-          client,
-          expectedProviderTenantId,
-          input.expectedProviderObjectId,
-        )
-      : null;
     const result = await client.query(
       `UPDATE gate_approver SET name = $3, email = $4, role_function = $5,
-          approval_role = $6, approval_level = $7, assigned_user_id = $8,
-          expected_provider_tenant_id = $9, expected_provider_object_id = $10
+          approval_role = $6, approval_level = $7, organization_name = $8
        WHERE gate_id = $1 AND id = $2`,
       [
         gateId,
@@ -1147,9 +1572,7 @@ async function updateGateApprover(
         input.roleFunction,
         input.approvalRole,
         input.approvalLevel,
-        assignedUserId,
-        expectedProviderTenantId,
-        input.expectedProviderObjectId,
+        input.organizationName,
       ],
     );
     if (result.rowCount === 0) return null;
@@ -1157,28 +1580,8 @@ async function updateGateApprover(
     return {
       id: approverId,
       ...input,
-      assignedUserId,
-      expectedProviderTenantId,
     };
   });
-}
-
-async function resolveApproverUserId(
-  client: PoolClient,
-  providerTenantId: string,
-  providerObjectId: string,
-) {
-  const result = await client.query(
-    `SELECT app_user.id
-     FROM app_user
-     JOIN user_identity ON user_identity.user_id = app_user.id
-     WHERE app_user.status = 'active'
-       AND user_identity.provider = 'microsoft'
-       AND user_identity.provider_tenant_id = $1
-       AND user_identity.provider_object_id = $2`,
-    [providerTenantId, providerObjectId],
-  );
-  return result.rows[0]?.id == null ? null : String(result.rows[0].id);
 }
 
 async function deleteGateApprover(
@@ -1192,88 +1595,6 @@ async function deleteGateApprover(
     const result = await client.query(
       "DELETE FROM gate_approver WHERE gate_id = $1 AND id = $2",
       [gateId, approverId],
-    );
-    if (result.rowCount === 0) return false;
-    await touchScope(client, scope, new Date().toISOString());
-    return true;
-  });
-}
-
-async function createGateCriterion(
-  scope: Scope,
-  gateId: string,
-  input: GateCriterionInput,
-) {
-  return withOperationalTransaction(async (client) => {
-    const gate = await lockScopeGate(client, scope, gateId);
-    if (!gate || !isGateInPreparation(gate)) return null;
-    const sequenceResult = await client.query(
-      `SELECT coalesce(max(sequence), 0) + 1 AS sequence
-       FROM gate_criterion WHERE gate_id = $1`,
-      [gateId],
-    );
-    const criterion = { id: randomUUID(), templateId: null, ...input };
-    await client.query(
-      `INSERT INTO gate_criterion (
-         id, gate_id, sequence, template_id, description, status
-       ) VALUES ($1, $2, $3, NULL, $4, $5)`,
-      [
-        criterion.id,
-        gateId,
-        Number(sequenceResult.rows[0]?.sequence),
-        criterion.description,
-        criterion.status,
-      ],
-    );
-    await touchScope(client, scope, new Date().toISOString());
-    return criterion;
-  });
-}
-
-async function updateGateCriterion(
-  scope: Scope,
-  gateId: string,
-  criterionId: string,
-  input: GateCriterionInput,
-) {
-  return withOperationalTransaction(async (client) => {
-    const gate = await lockScopeGate(client, scope, gateId);
-    if (!gate || !isGateInPreparation(gate)) return null;
-    const result = await client.query(
-      `UPDATE gate_criterion SET description = $3, status = $4
-       WHERE gate_id = $1 AND id = $2
-       RETURNING template_id`,
-      [gateId, criterionId, input.description, input.status],
-    );
-    if (result.rowCount === 0) return null;
-    await touchScope(client, scope, new Date().toISOString());
-    return {
-      id: criterionId,
-      templateId: result.rows[0].template_id == null
-        ? null
-        : String(result.rows[0].template_id),
-      ...input,
-    };
-  });
-}
-
-async function deleteGateCriterion(
-  scope: Scope,
-  gateId: string,
-  criterionId: string,
-) {
-  return withOperationalTransaction(async (client) => {
-    const gate = await lockScopeGate(client, scope, gateId);
-    if (!gate || !isGateInPreparation(gate)) return false;
-    const criterion = gate.criteria.find((candidate) => candidate.id === criterionId);
-    if (!criterion || criterion.templateId) return false;
-    await client.query(
-      "DELETE FROM deliverable_criterion WHERE criterion_id = $1",
-      [criterionId],
-    );
-    const result = await client.query(
-      "DELETE FROM gate_criterion WHERE gate_id = $1 AND id = $2",
-      [gateId, criterionId],
     );
     if (result.rowCount === 0) return false;
     await touchScope(client, scope, new Date().toISOString());
@@ -1332,64 +1653,6 @@ export function deletePackageGateApprover(
   approverId: string,
 ) {
   return deleteGateApprover({ projectId, packageId }, gateId, approverId);
-}
-
-export function createProjectGateCriterion(
-  projectId: string,
-  gateId: string,
-  input: GateCriterionInput,
-) {
-  return createGateCriterion({ projectId, packageId: null }, gateId, input);
-}
-
-export function updateProjectGateCriterion(
-  projectId: string,
-  gateId: string,
-  criterionId: string,
-  input: GateCriterionInput,
-) {
-  return updateGateCriterion(
-    { projectId, packageId: null },
-    gateId,
-    criterionId,
-    input,
-  );
-}
-
-export function deleteProjectGateCriterion(
-  projectId: string,
-  gateId: string,
-  criterionId: string,
-) {
-  return deleteGateCriterion({ projectId, packageId: null }, gateId, criterionId);
-}
-
-export function createPackageGateCriterion(
-  projectId: string,
-  packageId: string,
-  gateId: string,
-  input: GateCriterionInput,
-) {
-  return createGateCriterion({ projectId, packageId }, gateId, input);
-}
-
-export function updatePackageGateCriterion(
-  projectId: string,
-  packageId: string,
-  gateId: string,
-  criterionId: string,
-  input: GateCriterionInput,
-) {
-  return updateGateCriterion({ projectId, packageId }, gateId, criterionId, input);
-}
-
-export function deletePackageGateCriterion(
-  projectId: string,
-  packageId: string,
-  gateId: string,
-  criterionId: string,
-) {
-  return deleteGateCriterion({ projectId, packageId }, gateId, criterionId);
 }
 
 export async function getProjectActions(projectId: string) {
@@ -1729,6 +1992,199 @@ async function lockAction(
   return action;
 }
 
+type GateFollowUpReconciliationActor = {
+  userId: string | null;
+  displayName: string;
+  providerTenantId?: string | null;
+  providerObjectId?: string | null;
+  accessClass?: CurrentUser["accessClass"] | null;
+  authenticationMethod?: string | null;
+};
+
+async function lockReliableActionGates(
+  client: PoolClient,
+  projectId: string,
+  actionId: string,
+) {
+  const project = await client.query(
+    "SELECT id FROM project WHERE id = $1 AND archived_at IS NULL FOR UPDATE",
+    [projectId],
+  );
+  if (project.rowCount === 0) throw new Error("Action not found.");
+  const references = await client.query(
+    `SELECT DISTINCT reference.gate_id
+     FROM action_gate_decision_reference AS reference
+     JOIN gate_review_cycle AS cycle
+       ON cycle.id = reference.review_cycle_id
+      AND cycle.gate_id = reference.gate_id
+     WHERE reference.project_id = $1
+       AND reference.action_id = $2
+       AND reference.review_cycle_id IS NOT NULL
+     ORDER BY reference.gate_id`,
+    [projectId, actionId],
+  );
+  const gateIds = references.rows.map((row) => String(row.gate_id));
+  if (gateIds.length > 0) {
+    await client.query(
+      `SELECT id FROM gate
+       WHERE project_id = $1 AND id = ANY($2::text[])
+       ORDER BY id FOR UPDATE`,
+      [projectId, gateIds],
+    );
+  }
+}
+
+async function appendGateFollowUpReconciliationAudit(
+  client: PoolClient,
+  projectId: string,
+  gateId: string,
+  reviewCycleId: string,
+  triggeringActionId: string,
+  fromStatus: Gate["status"],
+  toStatus: Gate["status"],
+  resolvedActionCount: number,
+  unresolvedActionCount: number,
+  actor: GateFollowUpReconciliationActor,
+) {
+  const hasProviderIdentity = Boolean(
+    actor.providerTenantId && actor.providerObjectId,
+  );
+  await client.query(
+    `INSERT INTO audit_event (
+       request_id, actor_user_id, actor_provider_tenant_id,
+       actor_provider_object_id, actor_access_class, project_id, event_type,
+       resource_type, resource_id, change_summary, metadata
+     ) VALUES ($1, $2, $3, $4, $5, $6, 'gate.follow_up_status_reconciled',
+       'gate', $7, $8::jsonb, $9::jsonb)`,
+    [
+      randomUUID(),
+      actor.userId,
+      hasProviderIdentity ? actor.providerTenantId : null,
+      hasProviderIdentity ? actor.providerObjectId : null,
+      actor.accessClass ?? null,
+      projectId,
+      gateId,
+      JSON.stringify({
+        gateStatusFrom: fromStatus,
+        gateStatusTo: toStatus,
+      }),
+      JSON.stringify({
+        reviewCycleId,
+        triggeringActionId,
+        resolvedActionCount,
+        unresolvedActionCount,
+        triggeredByDisplayName: actor.displayName,
+        authenticationMethod: actor.authenticationMethod ?? null,
+      }),
+    ],
+  );
+}
+
+async function reconcileGateFollowUpStatus(
+  client: PoolClient,
+  projectId: string,
+  gateId: string,
+  triggeringActionId: string,
+  actor: GateFollowUpReconciliationActor,
+) {
+  const controllingCycleResult = await client.query(
+    `SELECT cycle.id, cycle.decision,
+            jsonb_array_length(
+              coalesce(cycle.frozen_evidence -> 'acceptedActions', '[]'::jsonb)
+            )::integer AS frozen_action_count
+     FROM gate_review_cycle AS cycle
+     WHERE cycle.gate_id = $1
+       AND cycle.decision IS NOT NULL
+       AND cycle.status IN ('approved', 'approved_with_actions')
+     ORDER BY cycle.cycle_number DESC, cycle.id DESC
+     LIMIT 1`,
+    [gateId],
+  );
+  const controllingCycle = controllingCycleResult.rows[0];
+  if (!controllingCycle || controllingCycle.decision !== "approved_with_actions") {
+    return;
+  }
+
+  const linkedActions = await client.query(
+    `SELECT action.id, action.status
+     FROM action_gate_decision_reference AS reference
+     JOIN project_action AS action
+       ON action.id = reference.action_id
+      AND action.project_id = reference.project_id
+     WHERE reference.project_id = $1
+       AND reference.gate_id = $2
+       AND reference.review_cycle_id = $3
+       AND reference.decision = 'approved_with_actions'
+     ORDER BY action.sequence, action.id`,
+    [projectId, gateId, String(controllingCycle.id)],
+  );
+  const frozenActionCount = Number(controllingCycle.frozen_action_count);
+  if (linkedActions.rowCount === 0 || linkedActions.rowCount !== frozenActionCount) {
+    return;
+  }
+
+  const unresolvedActionCount = linkedActions.rows.filter(
+    (row) => row.status !== "closed",
+  ).length;
+  const resolvedActionCount = linkedActions.rows.length - unresolvedActionCount;
+  const targetStatus: Gate["status"] = unresolvedActionCount === 0
+    ? "approved"
+    : "approved_with_actions";
+  const updated = await client.query(
+    `UPDATE gate SET status = $3
+     WHERE project_id = $1 AND id = $2
+       AND status IN ('approved', 'approved_with_actions')
+       AND status IS DISTINCT FROM $3
+     RETURNING status`,
+    [projectId, gateId, targetStatus],
+  );
+  if (updated.rowCount !== 1) return;
+  const fromStatus: Gate["status"] = targetStatus === "approved"
+    ? "approved_with_actions"
+    : "approved";
+  await appendGateFollowUpReconciliationAudit(
+    client,
+    projectId,
+    gateId,
+    String(controllingCycle.id),
+    triggeringActionId,
+    fromStatus,
+    targetStatus,
+    resolvedActionCount,
+    unresolvedActionCount,
+    actor,
+  );
+}
+
+async function reconcileActionGateFollowUpStatus(
+  client: PoolClient,
+  projectId: string,
+  actionId: string,
+  actor: GateFollowUpReconciliationActor,
+) {
+  const gateResult = await client.query(
+    `SELECT DISTINCT reference.gate_id
+     FROM action_gate_decision_reference AS reference
+     JOIN gate_review_cycle AS cycle
+       ON cycle.id = reference.review_cycle_id
+      AND cycle.gate_id = reference.gate_id
+     WHERE reference.project_id = $1
+       AND reference.action_id = $2
+       AND reference.review_cycle_id IS NOT NULL
+     ORDER BY reference.gate_id`,
+    [projectId, actionId],
+  );
+  for (const row of gateResult.rows) {
+    await reconcileGateFollowUpStatus(
+      client,
+      projectId,
+      String(row.gate_id),
+      actionId,
+      actor,
+    );
+  }
+}
+
 function sameValues(left: string[], right: string[]) {
   return left.length === right.length && left.every((value) => right.includes(value));
 }
@@ -1859,8 +2315,10 @@ export async function closeProjectAction(
   actionId: string,
   closedBy: ActionActor,
   comment: string | null,
+  reconciliationActor?: CurrentUser,
 ) {
   return withOperationalTransaction(async (client) => {
+    await lockReliableActionGates(client, projectId, actionId);
     const action = await lockAction(client, projectId, actionId);
     if (action.status === "closed") return action;
     const now = new Date().toISOString();
@@ -1877,6 +2335,14 @@ export async function closeProjectAction(
     if (comment) {
       await appendActionUpdate(client, actionId, closedBy, now, "comment", comment);
     }
+    await reconcileActionGateFollowUpStatus(client, projectId, actionId, {
+      userId: reconciliationActor?.id ?? closedBy.userId,
+      displayName: reconciliationActor?.displayName ?? closedBy.displayName,
+      providerTenantId: reconciliationActor?.providerTenantId,
+      providerObjectId: reconciliationActor?.providerObjectId,
+      accessClass: reconciliationActor?.accessClass,
+      authenticationMethod: reconciliationActor ? "microsoft_entra" : null,
+    });
     return loadProjectAction(client, projectId, actionId);
   });
 }
@@ -1887,8 +2353,10 @@ export async function reopenProjectAction(
   status: ReopenedProjectActionStatus,
   reopenedBy: ActionActor,
   comment: string | null,
+  reconciliationActor?: CurrentUser,
 ) {
   return withOperationalTransaction(async (client) => {
+    await lockReliableActionGates(client, projectId, actionId);
     const action = await lockAction(client, projectId, actionId);
     if (action.status !== "closed") {
       throw new Error("Only a Closed Action can be reopened.");
@@ -1915,6 +2383,14 @@ export async function reopenProjectAction(
     if (comment) {
       await appendActionUpdate(client, actionId, reopenedBy, now, "comment", comment);
     }
+    await reconcileActionGateFollowUpStatus(client, projectId, actionId, {
+      userId: reconciliationActor?.id ?? reopenedBy.userId,
+      displayName: reconciliationActor?.displayName ?? reopenedBy.displayName,
+      providerTenantId: reconciliationActor?.providerTenantId,
+      providerObjectId: reconciliationActor?.providerObjectId,
+      accessClass: reconciliationActor?.accessClass,
+      authenticationMethod: reconciliationActor ? "microsoft_entra" : null,
+    });
     return loadProjectAction(client, projectId, actionId);
   });
 }
@@ -1929,7 +2405,9 @@ async function protectGateActions(
   const uniqueIds = [...new Set(acceptedActionIds)];
   const result = uniqueIds.length > 0
     ? await client.query(
-        `SELECT id FROM project_action
+        `SELECT id, sequence, description, assignee, due_date::text AS due_date,
+                status
+         FROM project_action
          WHERE project_id = $1 AND source = 'gate' AND gate_id = $2
            AND id = ANY($3::text[])
          ORDER BY sequence, id FOR UPDATE`,
@@ -1941,7 +2419,8 @@ async function protectGateActions(
   }
   const now = new Date().toISOString();
   const referenceIds: string[] = [];
-  for (const actionId of uniqueIds) {
+  for (const row of result.rows) {
+    const actionId = String(row.id);
     const sequenceResult = await client.query(
       `SELECT coalesce(max(sequence), 0) + 1 AS sequence
        FROM action_gate_decision_reference WHERE action_id = $1`,
@@ -1952,8 +2431,11 @@ async function protectGateActions(
     await client.query(
       `INSERT INTO action_gate_decision_reference (
          id, action_id, gate_id, project_id, sequence, decision, recorded_at,
-         review_cycle_id
-       ) VALUES ($1, $2, $3, $4, $5, 'approved_with_actions', $6, $7)`,
+          review_cycle_id, action_sequence_at_approval,
+          description_at_approval, assignee_at_approval,
+          due_date_at_approval, status_at_approval
+        ) VALUES ($1, $2, $3, $4, $5, 'approved_with_actions', $6, $7,
+          $8, $9, $10, $11::date, $12)`,
       [
         referenceId,
         actionId,
@@ -1962,6 +2444,11 @@ async function protectGateActions(
         Number(sequenceResult.rows[0]?.sequence),
         now,
         reviewCycleId,
+        Number(row.sequence),
+        String(row.description),
+        String(row.assignee),
+        row.due_date == null ? null : String(row.due_date),
+        String(row.status),
       ],
     );
   }
@@ -2089,6 +2576,9 @@ async function submitSpecificGateForApproval(
     gate = await loadGate(client, scope.projectId, scope.packageId, gateId);
     if (!gate) return null;
   }
+  await lockScopeMatrixGates(client, scope);
+  const matrixReview = await loadGateMatrixReviewContext(client, scope, gateId);
+  if (!matrixReview) return null;
   const deliverables = await loadGateDeliverables(
     client,
     scope.projectId,
@@ -2098,17 +2588,32 @@ async function submitSpecificGateForApproval(
   const gateActions = (await loadProjectActions(client, scope.projectId)).filter(
     (action) => action.source === "gate" && action.gateId === gateId,
   );
-  const issues = getGateSubmissionIssues(gate, deliverables, gateActions);
-  const unassignedApprovers = gate.approvers.filter(
-    (approver) => !approver.expectedProviderTenantId || !approver.expectedProviderObjectId,
-  );
-  if (unassignedApprovers.length > 0) {
-    issues.push({
-      code: "invalid_approver_identities",
-      message: `${unassignedApprovers.length} Gate Approver${unassignedApprovers.length === 1 ? " needs" : "s need"} an authoritative Microsoft Entra Object ID.`,
-    });
+  const isMethodologyGate = gate.stageId === (scope.packageId ? "definition" : "initiation");
+  let scopeApplicability: Parameters<typeof getGateSubmissionIssues>[3];
+  if (isMethodologyGate) {
+    const review = await getApplicabilityReview(scope.projectId, scope.packageId);
+    if (!review) return null;
+    const allItems = review.gates.flatMap((entry) => [
+      ...entry.deliverables,
+    ]);
+    scopeApplicability = {
+      scopeLabel: scope.packageId ? "Package" : "Project",
+      items: allItems,
+    };
   }
+  const issues = [
+    ...getGateSubmissionIssues(
+      gate,
+      deliverables,
+      gateActions,
+      scopeApplicability,
+    ),
+    ...getMatrixReviewSubmissionIssues(matrixReview.state),
+  ];
   if (issues.length > 0) return { outcome: "blocked", issues };
+  if (!matrixReview.state.confirmation) {
+    throw new Error("A valid Applicability Matrix confirmation could not be loaded.");
+  }
 
   const now = new Date().toISOString();
   const reviewCycle = createGateReviewCycle({
@@ -2137,6 +2642,8 @@ async function submitSpecificGateForApproval(
       : projectStageLabel(gate.stageId),
     deliverables,
     gateActions,
+    applicabilityMatrix: matrixReview.matrix,
+    matrixReviewConfirmation: matrixReview.state.confirmation,
   });
   await insertReviewCycle(client, gateId, reviewCycle);
   await client.query(
@@ -2196,13 +2703,18 @@ async function insertReviewCycle(
     ],
   );
   for (const [index, approver] of cycle.approvers.entries()) {
+    approver.authenticationMethod = "email_otp";
+    approver.reviewAccessId = randomUUID();
+    approver.assignedUserId = null;
+    approver.expectedProviderTenantId = null;
+    approver.expectedProviderObjectId = null;
     await client.query(
        `INSERT INTO gate_review_cycle_approver (
           review_cycle_id, gate_approver_id, sequence, name, email,
           role_function, approval_role, approval_level, assigned_user_id,
           invitation_activated_at, expected_provider_tenant_id,
-          expected_provider_object_id
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+          expected_provider_object_id, authentication_method, review_access_id
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
       [
         cycle.id,
         approver.gateApproverId,
@@ -2216,6 +2728,8 @@ async function insertReviewCycle(
         approver.invitation?.activatedAt ?? null,
         approver.expectedProviderTenantId,
         approver.expectedProviderObjectId,
+        approver.authenticationMethod,
+        approver.reviewAccessId,
       ],
     );
   }
@@ -2258,9 +2772,47 @@ async function withdrawGateSubmission(
   client: PoolClient,
   scope: Scope,
   gateId: string,
+  withdrawalReason: string,
+  withdrawnBy: GateReviewActorSnapshot,
 ) {
   const gate = await lockScopeGate(client, scope, gateId);
   if (!gate) return null;
+  if (!withdrawnBy.userId || !withdrawnBy.providerTenantId || !withdrawnBy.providerObjectId) {
+    throw new Error("An authenticated Project Owner is required to withdraw a Gate Review Cycle.");
+  }
+  const ownerResult = await client.query(
+    `SELECT app_user.id, app_user.display_name, app_user.email,
+            user_identity.provider_tenant_id, user_identity.provider_object_id
+     FROM project_membership
+     JOIN app_user ON app_user.id = project_membership.user_id
+     JOIN user_identity
+       ON user_identity.user_id = app_user.id
+      AND user_identity.provider = 'microsoft'
+     WHERE project_membership.project_id = $1
+       AND project_membership.user_id = $2
+       AND project_membership.role = 'owner'
+       AND app_user.status = 'active'
+       AND app_user.access_class = 'internal'
+       AND user_identity.provider_tenant_id = $3
+       AND user_identity.provider_object_id = $4`,
+    [
+      scope.projectId,
+      withdrawnBy.userId,
+      withdrawnBy.providerTenantId,
+      withdrawnBy.providerObjectId,
+    ],
+  );
+  if (ownerResult.rowCount !== 1) {
+    throw new Error("Only an authenticated Project Owner may withdraw a Gate Review Cycle.");
+  }
+  const owner = ownerResult.rows[0];
+  const authenticatedOwner: GateReviewActorSnapshot = {
+    userId: String(owner.id),
+    displayName: String(owner.display_name),
+    email: String(owner.email),
+    providerTenantId: String(owner.provider_tenant_id),
+    providerObjectId: String(owner.provider_object_id),
+  };
   const project = await loadProject(client, scope.projectId);
   const entity = scope.packageId
     ? await loadPackage(client, scope.projectId, scope.packageId)
@@ -2273,26 +2825,34 @@ async function withdrawGateSubmission(
   const now = new Date().toISOString();
   const result = withdrawGateReviewCycle(gate, {
     withdrawnAt: now,
-    withdrawnBy: {
-      userId: null,
-      displayName: project.projectManager,
-      email: null,
-    },
+    withdrawnBy: authenticatedOwner,
+    withdrawalReason,
   });
   if (result.outcome !== "withdrawn") return result;
-  await client.query(
+  const cycleUpdate = await client.query(
     `UPDATE gate_review_cycle SET status = 'withdrawn', completed_at = $2,
        withdrawn_at = $2, withdrawn_by = $3::jsonb,
-       withdrawn_by_user_id = NULL, withdrawal_reason = $4
-     WHERE id = $1`,
+       withdrawn_by_user_id = $4, withdrawal_reason = $5
+     WHERE id = $1 AND status = 'awaiting_approval' AND decision IS NULL
+     RETURNING id`,
     [
       result.reviewCycle.id,
       now,
       JSON.stringify(result.reviewCycle.withdrawnBy),
+      result.reviewCycle.withdrawnBy?.userId,
       result.reviewCycle.withdrawalReason,
     ],
   );
-  await client.query("UPDATE gate SET status = 'not_submitted' WHERE id = $1", [gateId]);
+  if (cycleUpdate.rowCount !== 1) return { outcome: "not_submitted" as const };
+  const gateUpdate = await client.query(
+    `UPDATE gate SET status = 'not_submitted'
+     WHERE id = $1 AND status = 'submitted_for_approval'
+     RETURNING id`,
+    [gateId],
+  );
+  if (gateUpdate.rowCount !== 1) {
+    throw new Error("The active Gate could not be returned to preparation.");
+  }
   await touchScope(client, scope, now);
   const updated = scope.packageId
     ? await loadPackage(client, scope.projectId, scope.packageId)
@@ -2308,9 +2868,17 @@ async function withdrawGateSubmission(
 export async function withdrawProjectGateSubmission(
   projectId: string,
   gateId: string,
+  withdrawalReason: string,
+  withdrawnBy: GateReviewActorSnapshot,
 ): Promise<GateWithdrawalResult<Project> | null> {
   return withOperationalTransaction(async (client) =>
-    withdrawGateSubmission(client, { projectId, packageId: null }, gateId) as Promise<
+    withdrawGateSubmission(
+      client,
+      { projectId, packageId: null },
+      gateId,
+      withdrawalReason,
+      withdrawnBy,
+    ) as Promise<
       GateWithdrawalResult<Project> | null
     >,
   );
@@ -2320,9 +2888,17 @@ export async function withdrawPackageGateSubmission(
   projectId: string,
   packageId: string,
   gateId: string,
+  withdrawalReason: string,
+  withdrawnBy: GateReviewActorSnapshot,
 ): Promise<GateWithdrawalResult<ProjectPackage> | null> {
   return withOperationalTransaction(async (client) =>
-    withdrawGateSubmission(client, { projectId, packageId }, gateId) as Promise<
+    withdrawGateSubmission(
+      client,
+      { projectId, packageId },
+      gateId,
+      withdrawalReason,
+      withdrawnBy,
+    ) as Promise<
       GateWithdrawalResult<ProjectPackage> | null
     >,
   );
@@ -2731,7 +3307,442 @@ export async function completePackageGateReviewInvitation(
   );
 }
 
-export async function internalAssignGateReviewApproverUser(input: {
+type OtpAssignmentRow = {
+  review_cycle_id: string;
+  gate_approver_id: string;
+  name: string;
+  email: string;
+  approval_level: number;
+  invitation_activated_at: Date | string | null;
+  cycle_status: string;
+  project_id: string;
+  package_id: string | null;
+  gate_id: string;
+  project_snapshot: unknown;
+  gate_snapshot: unknown;
+};
+
+export async function getGateReviewOtpAccess(reviewAccessId: string) {
+  if (!isUuid(reviewAccessId)) return null;
+  return withOperationalClient(async (client) => {
+    const assignment = await loadOtpAssignment(client, reviewAccessId, false);
+    if (!assignment) return null;
+    return {
+      maskedEmail: maskGateReviewEmail(assignment.email),
+      cycleStatus: assignment.cycle_status,
+      canRequestCode: await otpAssignmentIsEligible(client, assignment),
+    };
+  });
+}
+
+export type GateReviewOtpChallengeClaim =
+  | {
+      outcome: "created";
+      challengeId: string;
+      code: string;
+      email: string;
+      approverName: string;
+      projectLabel: string;
+      gateName: string;
+    }
+  | { outcome: "rate_limited" | "unavailable" };
+
+export async function claimGateReviewOtpChallenge(
+  reviewAccessId: string,
+): Promise<GateReviewOtpChallengeClaim> {
+  if (!isUuid(reviewAccessId)) return { outcome: "unavailable" };
+  return withOperationalTransaction(async (client) => {
+    const assignment = await loadOtpAssignment(client, reviewAccessId, true);
+    if (!assignment || !await otpAssignmentIsEligible(client, assignment)) {
+      return { outcome: "unavailable" };
+    }
+    const challengeHistory = await client.query(
+      `SELECT coalesce(max(sequence), 0)::integer AS maximum_sequence,
+              max(requested_at) AS most_recent_requested_at,
+              count(*) FILTER (
+                WHERE requested_at > clock_timestamp() - interval '1 hour'
+              )::integer AS recent_count
+       FROM gate_review_otp_challenge
+       WHERE review_cycle_id = $1 AND gate_approver_id = $2`,
+      [assignment.review_cycle_id, assignment.gate_approver_id],
+    );
+    const history = challengeHistory.rows[0];
+    const mostRecent = history?.most_recent_requested_at == null
+      ? null
+      : new Date(history.most_recent_requested_at);
+    if (
+      Number(history?.recent_count ?? 0) >= gateReviewOtpHourlyLimit
+      || (mostRecent && Date.now() - mostRecent.getTime() < gateReviewOtpResendSeconds * 1000)
+    ) {
+      await insertPublicGateReviewAudit(client, assignment.project_id, {
+        eventType: "gate_review.otp_rate_limited",
+        resourceType: "gate_review_cycle",
+        resourceId: assignment.review_cycle_id,
+        metadata: { gateApproverId: assignment.gate_approver_id },
+      });
+      return { outcome: "rate_limited" };
+    }
+
+    const sequence = Number(history?.maximum_sequence ?? 0) + 1;
+    const challengeId = randomUUID();
+    const code = generateGateReviewOtp();
+    const requestedAt = new Date();
+    const expiresAt = new Date(
+      requestedAt.getTime() + gateReviewOtpLifetimeMinutes * 60_000,
+    );
+    await client.query(
+      `INSERT INTO gate_review_otp_challenge (
+         id, review_cycle_id, gate_approver_id, sequence, code_digest,
+         requested_at, expires_at, delivery_status
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'dispatching')`,
+      [
+        challengeId,
+        assignment.review_cycle_id,
+        assignment.gate_approver_id,
+        sequence,
+        digestGateReviewOtp(reviewAccessId, code),
+        requestedAt.toISOString(),
+        expiresAt.toISOString(),
+      ],
+    );
+    await insertPublicGateReviewAudit(client, assignment.project_id, {
+      eventType: "gate_review.otp_requested",
+      resourceType: "gate_review_otp_challenge",
+      resourceId: challengeId,
+      metadata: {
+        reviewCycleId: assignment.review_cycle_id,
+        gateApproverId: assignment.gate_approver_id,
+      },
+    });
+    const project = assignment.project_snapshot as { projectNumber: string; name: string };
+    const gate = assignment.gate_snapshot as { name: string };
+    return {
+      outcome: "created",
+      challengeId,
+      code,
+      email: assignment.email,
+      approverName: assignment.name,
+      projectLabel: `${project.projectNumber} - ${project.name}`,
+      gateName: gate.name,
+    };
+  });
+}
+
+export async function completeGateReviewOtpDelivery(
+  challengeId: string,
+  result: GateReviewInvitationAttemptResult,
+) {
+  return withOperationalTransaction(async (client) => {
+    const challenge = await client.query(
+      `SELECT challenge.review_cycle_id, challenge.gate_approver_id, gate.project_id
+       FROM gate_review_otp_challenge AS challenge
+       JOIN gate_review_cycle AS cycle ON cycle.id = challenge.review_cycle_id
+       JOIN gate ON gate.id = cycle.gate_id
+       WHERE challenge.id = $1 AND challenge.delivery_status = 'dispatching'
+       FOR UPDATE OF challenge`,
+      [challengeId],
+    );
+    if (challenge.rowCount !== 1) return false;
+    const row = challenge.rows[0];
+    const completedAt = new Date().toISOString();
+    await client.query(
+      `UPDATE gate_review_otp_challenge
+       SET delivery_status = $2, delivery_completed_at = $3,
+           provider_message_id = $4, error_code = $5, error_message = $6
+       WHERE id = $1 AND delivery_status = 'dispatching'`,
+      [
+        challengeId,
+        result.status,
+        completedAt,
+        result.status === "sent" ? result.providerMessageId : null,
+        result.status === "sent" ? null : result.error.code,
+        result.status === "sent" ? null : result.error.message,
+      ],
+    );
+    await insertPublicGateReviewAudit(client, String(row.project_id), {
+      eventType: result.status === "sent"
+        ? "gate_review.otp_delivery_succeeded"
+        : "gate_review.otp_delivery_failed",
+      resourceType: "gate_review_otp_challenge",
+      resourceId: challengeId,
+      metadata: {
+        reviewCycleId: String(row.review_cycle_id),
+        gateApproverId: String(row.gate_approver_id),
+        deliveryStatus: result.status,
+      },
+    });
+    return true;
+  });
+}
+
+export type GateReviewOtpVerificationResult =
+  | { outcome: "verified"; sessionToken: string; expiresAt: string }
+  | { outcome: "invalid_code" | "locked" | "unavailable" };
+
+export async function verifyGateReviewOtp(
+  reviewAccessId: string,
+  code: string,
+): Promise<GateReviewOtpVerificationResult> {
+  if (!isUuid(reviewAccessId)) return { outcome: "invalid_code" };
+  return withOperationalTransaction(async (client) => {
+    const assignment = await loadOtpAssignment(client, reviewAccessId, true);
+    if (!assignment || !await otpAssignmentIsEligible(client, assignment)) {
+      return { outcome: "unavailable" };
+    }
+    const challengeResult = await client.query(
+      `SELECT * FROM gate_review_otp_challenge
+       WHERE review_cycle_id = $1 AND gate_approver_id = $2
+         AND delivery_status = 'sent' AND consumed_at IS NULL
+       ORDER BY requested_at DESC, sequence DESC
+       LIMIT 1 FOR UPDATE`,
+      [assignment.review_cycle_id, assignment.gate_approver_id],
+    );
+    const challenge = challengeResult.rows[0];
+    if (!challenge || new Date(challenge.expires_at).getTime() <= Date.now()) {
+      return { outcome: "unavailable" };
+    }
+    if (challenge.locked_at != null || Number(challenge.failed_attempt_count) >= gateReviewOtpMaximumAttempts) {
+      return { outcome: "locked" };
+    }
+    if (!/^\d{6}$/.test(code) || !verifyGateReviewOtpDigest(reviewAccessId, code, String(challenge.code_digest))) {
+      const failedAttempts = Number(challenge.failed_attempt_count) + 1;
+      const lockedAt = failedAttempts >= gateReviewOtpMaximumAttempts
+        ? new Date().toISOString()
+        : null;
+      await client.query(
+        `UPDATE gate_review_otp_challenge
+         SET failed_attempt_count = $2, locked_at = $3
+         WHERE id = $1`,
+        [challenge.id, failedAttempts, lockedAt],
+      );
+      await insertPublicGateReviewAudit(client, assignment.project_id, {
+        eventType: "gate_review.otp_verification_failed",
+        resourceType: "gate_review_otp_challenge",
+        resourceId: String(challenge.id),
+        metadata: {
+          reviewCycleId: assignment.review_cycle_id,
+          gateApproverId: assignment.gate_approver_id,
+          locked: lockedAt !== null,
+        },
+      });
+      return { outcome: lockedAt ? "locked" : "invalid_code" };
+    }
+
+    const consumedAt = new Date();
+    await client.query(
+      "UPDATE gate_review_otp_challenge SET consumed_at = $2 WHERE id = $1",
+      [challenge.id, consumedAt.toISOString()],
+    );
+    const sessionId = randomUUID();
+    const sessionToken = generateGateReviewSessionToken();
+    const expiresAt = new Date(
+      consumedAt.getTime() + gateReviewSessionLifetimeMinutes * 60_000,
+    );
+    await client.query(
+      `INSERT INTO gate_review_session (
+         id, review_cycle_id, gate_approver_id, otp_challenge_id,
+         token_hash, created_at, expires_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [
+        sessionId,
+        assignment.review_cycle_id,
+        assignment.gate_approver_id,
+        challenge.id,
+        hashGateReviewSessionToken(sessionToken),
+        consumedAt.toISOString(),
+        expiresAt.toISOString(),
+      ],
+    );
+    await insertPublicGateReviewAudit(client, assignment.project_id, {
+      eventType: "gate_review.otp_verification_succeeded",
+      resourceType: "gate_review_session",
+      resourceId: sessionId,
+      metadata: {
+        reviewCycleId: assignment.review_cycle_id,
+        gateApproverId: assignment.gate_approver_id,
+      },
+    });
+    return {
+      outcome: "verified",
+      sessionToken,
+      expiresAt: expiresAt.toISOString(),
+    };
+  });
+}
+
+export async function getOtpAssignedGateReview(
+  reviewAccessId: string,
+  sessionToken: string,
+): Promise<(AssignedGateReview & { sessionId: string }) | null> {
+  if (!isUuid(reviewAccessId) || !sessionToken) return null;
+  return withOperationalClient(async (client) => {
+    const result = await client.query(
+      `SELECT session.id, session.review_cycle_id, session.gate_approver_id,
+              gate.project_id, gate.package_id, gate.id AS gate_id
+       FROM gate_review_session AS session
+       JOIN gate_review_cycle_approver AS approver
+         ON approver.review_cycle_id = session.review_cycle_id
+        AND approver.gate_approver_id = session.gate_approver_id
+       JOIN gate_review_cycle AS cycle ON cycle.id = session.review_cycle_id
+       JOIN gate ON gate.id = cycle.gate_id
+       WHERE approver.review_access_id = $1
+         AND session.token_hash = $2
+         AND session.expires_at > clock_timestamp()`,
+      [reviewAccessId, hashGateReviewSessionToken(sessionToken)],
+    );
+    if (result.rowCount !== 1) return null;
+    const row = result.rows[0];
+    const projectId = String(row.project_id);
+    const packageId = row.package_id == null ? null : String(row.package_id);
+    const gateId = String(row.gate_id);
+    const reviewCycleId = String(row.review_cycle_id);
+    const gate = await loadGate(client, projectId, packageId, gateId);
+    const reviewCycle = gate?.reviewCycles.find((cycle) => cycle.id === reviewCycleId);
+    const assignedApprover = reviewCycle?.approvers.find(
+      (approver) => approver.gateApproverId === String(row.gate_approver_id),
+    );
+    if (!reviewCycle || !assignedApprover) return null;
+    return {
+      projectId,
+      packageId,
+      gateId,
+      reviewCycle,
+      assignedApprover,
+      sessionId: String(row.id),
+    };
+  });
+}
+
+async function loadOtpAssignment(
+  client: PoolClient,
+  reviewAccessId: string,
+  lock: boolean,
+): Promise<OtpAssignmentRow | null> {
+  const result = await client.query<OtpAssignmentRow>(
+    `SELECT approver.review_cycle_id, approver.gate_approver_id,
+            approver.name, approver.email, approver.approval_level,
+            approver.invitation_activated_at, cycle.status AS cycle_status,
+            cycle.project_snapshot, cycle.gate_snapshot,
+            gate.project_id, gate.package_id, gate.id AS gate_id
+     FROM gate_review_cycle_approver AS approver
+     JOIN gate_review_cycle AS cycle ON cycle.id = approver.review_cycle_id
+     JOIN gate ON gate.id = cycle.gate_id
+     WHERE approver.review_access_id = $1
+       AND approver.authentication_method = 'email_otp'
+     ${lock ? "FOR UPDATE OF approver, cycle" : ""}`,
+    [reviewAccessId],
+  );
+  return result.rows[0] ?? null;
+}
+
+async function otpAssignmentIsEligible(client: PoolClient, assignment: OtpAssignmentRow) {
+  if (
+    assignment.cycle_status !== "awaiting_approval"
+    || assignment.invitation_activated_at == null
+  ) return false;
+  const result = await client.query(
+    `SELECT NOT EXISTS (
+       SELECT 1
+       FROM gate_review_cycle_approver AS earlier
+       WHERE earlier.review_cycle_id = $1
+         AND earlier.approval_level < $3
+         AND NOT EXISTS (
+           SELECT 1 FROM gate_review_response AS response
+           WHERE response.review_cycle_id = earlier.review_cycle_id
+             AND response.gate_approver_id = earlier.gate_approver_id
+         )
+     ) AS eligible,
+     NOT EXISTS (
+       SELECT 1 FROM gate_review_response AS response
+       WHERE response.review_cycle_id = $1
+         AND response.gate_approver_id = $2
+     ) AS unanswered`,
+    [assignment.review_cycle_id, assignment.gate_approver_id, assignment.approval_level],
+  );
+  return result.rows[0]?.eligible === true && result.rows[0]?.unanswered === true;
+}
+
+async function insertPublicGateReviewAudit(
+  client: PoolClient,
+  projectId: string,
+  event: {
+    eventType: string;
+    resourceType: string;
+    resourceId: string;
+    metadata?: Record<string, unknown>;
+  },
+) {
+  await client.query(
+    `INSERT INTO audit_event (
+       request_id, project_id, event_type, resource_type, resource_id, metadata
+     ) VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
+    [
+      randomUUID(),
+      projectId,
+      event.eventType,
+      event.resourceType,
+      event.resourceId,
+      JSON.stringify(event.metadata ?? {}),
+    ],
+  );
+}
+
+function isUuid(value: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+export type ActiveGateReviewIdentityLinkCandidate = VerifiedApproverUser & {
+  gateApproverId: string;
+};
+
+export async function getActiveGateReviewIdentityLinkCandidates(input: {
+  projectId: string;
+  packageId: string | null;
+  gateId: string;
+  reviewCycleId: string;
+}): Promise<ActiveGateReviewIdentityLinkCandidate[]> {
+  return withOperationalClient(async (client) => {
+    const result = await client.query(
+      `SELECT snapshot.gate_approver_id, app_user.id, app_user.display_name,
+              app_user.email, app_user.access_class,
+              organization.name AS organization_name
+       FROM gate_review_cycle_approver AS snapshot
+       JOIN gate_review_cycle AS cycle ON cycle.id = snapshot.review_cycle_id
+       JOIN gate ON gate.id = cycle.gate_id
+       JOIN user_identity
+         ON user_identity.provider = 'microsoft'
+        AND user_identity.provider_tenant_id = snapshot.expected_provider_tenant_id
+        AND user_identity.provider_object_id = snapshot.expected_provider_object_id
+       JOIN app_user
+         ON app_user.id = user_identity.user_id
+        AND app_user.status = 'active'
+       LEFT JOIN organization ON organization.id = app_user.organization_id
+       WHERE snapshot.review_cycle_id = $1
+         AND snapshot.assigned_user_id IS NULL
+         AND cycle.status = 'awaiting_approval'
+         AND gate.id = $2
+         AND gate.project_id = $3
+         AND gate.package_id IS NOT DISTINCT FROM $4::text
+         AND NOT EXISTS (
+           SELECT 1 FROM gate_review_response
+           WHERE gate_review_response.review_cycle_id = snapshot.review_cycle_id
+             AND gate_review_response.gate_approver_id = snapshot.gate_approver_id
+         )
+       ORDER BY snapshot.sequence, snapshot.gate_approver_id`,
+      [input.reviewCycleId, input.gateId, input.projectId, input.packageId],
+    );
+    return result.rows.map((row) => ({
+      gateApproverId: String(row.gate_approver_id),
+      id: String(row.id),
+      displayName: String(row.display_name),
+      email: String(row.email),
+      organizationName: row.organization_name == null ? null : String(row.organization_name),
+      accessClass: String(row.access_class) as VerifiedApproverUser["accessClass"],
+    }));
+  });
+}
+
+export async function linkActiveGateReviewApproverUser(input: {
   projectId: string;
   packageId: string | null;
   gateId: string;
@@ -2753,19 +3764,40 @@ export async function internalAssignGateReviewApproverUser(input: {
       [input.reviewCycleId, input.gateId],
     );
     if (cycle.rowCount === 0) return false;
-    const user = await client.query(
-      "SELECT id FROM app_user WHERE id = $1 AND status = 'active'",
-      [input.userId],
-    );
-    if (user.rowCount === 0) return false;
-    const snapshot = await client.query(
-      `SELECT assigned_user_id FROM gate_review_cycle_approver
-       WHERE review_cycle_id = $1 AND gate_approver_id = $2 FOR UPDATE`,
+    const snapshot = await client.query<{
+      assigned_user_id: string | null;
+      expected_provider_tenant_id: string | null;
+      expected_provider_object_id: string | null;
+    }>(
+      `SELECT assigned_user_id, expected_provider_tenant_id,
+              expected_provider_object_id
+       FROM gate_review_cycle_approver
+       WHERE review_cycle_id = $1 AND gate_approver_id = $2
+         AND NOT EXISTS (
+           SELECT 1 FROM gate_review_response
+           WHERE gate_review_response.review_cycle_id = $1
+             AND gate_review_response.gate_approver_id = $2
+         )
+       FOR UPDATE`,
       [input.reviewCycleId, input.gateApproverId],
     );
     if (snapshot.rowCount === 0) return false;
     const assignedUserId = snapshot.rows[0].assigned_user_id;
     if (assignedUserId != null) return String(assignedUserId) === input.userId;
+    const expectedTenantId = snapshot.rows[0].expected_provider_tenant_id;
+    const expectedObjectId = snapshot.rows[0].expected_provider_object_id;
+    if (!expectedTenantId || !expectedObjectId) return false;
+    const user = await client.query(
+      `SELECT app_user.id FROM app_user
+       JOIN user_identity ON user_identity.user_id = app_user.id
+       WHERE app_user.id = $1
+         AND app_user.status = 'active'
+         AND user_identity.provider = 'microsoft'
+         AND user_identity.provider_tenant_id = $2
+         AND user_identity.provider_object_id = $3`,
+      [input.userId, expectedTenantId, expectedObjectId],
+    );
+    if (user.rowCount !== 1) return false;
     const updated = await client.query(
       `UPDATE gate_review_cycle_approver SET assigned_user_id = $3
        WHERE review_cycle_id = $1 AND gate_approver_id = $2
@@ -2776,17 +3808,30 @@ export async function internalAssignGateReviewApproverUser(input: {
   });
 }
 
-export async function internalRecordIdentityBoundGateReviewResponse(input: {
+type AuthorizedGateReviewResponseInput = {
   projectId: string;
   packageId: string | null;
   gateId: string;
   reviewCycleId: string;
-  actorUserId: string;
-  actorProviderTenantId: string;
-  actorProviderObjectId: string;
   outcome: GateReviewResponseInput["outcome"];
   comment: string;
-}): Promise<GateReviewResponseResult<Project | ProjectPackage> | null> {
+} & (
+  | {
+      authenticationMethod?: "microsoft_entra";
+      actorUserId: string;
+      actorProviderTenantId: string;
+      actorProviderObjectId: string;
+    }
+  | {
+      authenticationMethod: "email_otp";
+      gateApproverId: string;
+      reviewSessionId: string;
+    }
+);
+
+export async function internalRecordIdentityBoundGateReviewResponse(
+  input: AuthorizedGateReviewResponseInput,
+): Promise<GateReviewResponseResult<Project | ProjectPackage> | null> {
   return withOperationalTransaction(async (client) => {
     const scope = { projectId: input.projectId, packageId: input.packageId };
     const gate = await lockScopeGate(client, scope, input.gateId);
@@ -2817,26 +3862,92 @@ export async function internalRecordIdentityBoundGateReviewResponse(input: {
     );
     if (!currentGate || !cycle) return { outcome: "review_cycle_mismatch" };
     const approvalState = getGateReviewApprovalState(cycle);
-    const assignments = await client.query(
-      `SELECT gate_approver_id FROM gate_review_cycle_approver
-       WHERE review_cycle_id = $1 AND assigned_user_id = $2
-         AND expected_provider_tenant_id = $3
-         AND expected_provider_object_id = $4
-       ORDER BY sequence, gate_approver_id FOR UPDATE`,
-      [
-        input.reviewCycleId,
-        input.actorUserId,
-        input.actorProviderTenantId,
-        input.actorProviderObjectId,
-      ],
-    );
-    const assignedApprovers = assignments.rows.flatMap((row) => {
-      const id = String(row.gate_approver_id);
-      const approver = cycle.approvers.find(
-        (candidate) => candidate.gateApproverId === id,
+    let assignedApprovers: typeof cycle.approvers;
+    let actor: GateReviewActorSnapshot;
+    let responderUserId: string | null;
+    let responderProviderTenantId: string | null;
+    let responderProviderObjectId: string | null;
+    let reviewSessionId: string | null;
+    if (input.authenticationMethod === "email_otp") {
+      const session = await client.query(
+        `SELECT 1
+         FROM gate_review_session AS session
+         JOIN gate_review_cycle_approver AS approver
+           ON approver.review_cycle_id = session.review_cycle_id
+          AND approver.gate_approver_id = session.gate_approver_id
+         WHERE session.id = $1
+           AND session.review_cycle_id = $2
+           AND session.gate_approver_id = $3
+           AND session.expires_at > clock_timestamp()
+           AND approver.authentication_method = 'email_otp'
+         FOR UPDATE OF session, approver`,
+        [input.reviewSessionId, input.reviewCycleId, input.gateApproverId],
       );
-      return approver ? [approver] : [];
-    });
+      if (session.rowCount !== 1) return { outcome: "approver_not_found" };
+      assignedApprovers = cycle.approvers.filter(
+        (approver) => approver.gateApproverId === input.gateApproverId,
+      );
+      const assigned = assignedApprovers[0];
+      actor = {
+        userId: null,
+        displayName: assigned?.name ?? "Gate Approver",
+        email: assigned?.email ?? null,
+        authenticationMethod: "email_otp",
+        reviewSessionId: input.reviewSessionId,
+      };
+      responderUserId = null;
+      responderProviderTenantId = null;
+      responderProviderObjectId = null;
+      reviewSessionId = input.reviewSessionId;
+    } else {
+      const assignments = await client.query(
+        `SELECT gate_approver_id FROM gate_review_cycle_approver
+         WHERE review_cycle_id = $1 AND assigned_user_id = $2
+           AND expected_provider_tenant_id = $3
+           AND expected_provider_object_id = $4
+         ORDER BY sequence, gate_approver_id FOR UPDATE`,
+        [
+          input.reviewCycleId,
+          input.actorUserId,
+          input.actorProviderTenantId,
+          input.actorProviderObjectId,
+        ],
+      );
+      assignedApprovers = assignments.rows.flatMap((row) => {
+        const id = String(row.gate_approver_id);
+        const approver = cycle.approvers.find(
+          (candidate) => candidate.gateApproverId === id,
+        );
+        return approver ? [approver] : [];
+      });
+      const actorResult = await client.query(
+        `SELECT app_user.id, app_user.display_name, app_user.email
+         FROM app_user
+         JOIN user_identity ON user_identity.user_id = app_user.id
+         WHERE app_user.id = $1 AND app_user.status = 'active'
+           AND user_identity.provider = 'microsoft'
+           AND user_identity.provider_tenant_id = $2
+           AND user_identity.provider_object_id = $3`,
+        [
+          input.actorUserId,
+          input.actorProviderTenantId,
+          input.actorProviderObjectId,
+        ],
+      );
+      if (actorResult.rowCount === 0) return { outcome: "approver_not_found" };
+      actor = {
+        userId: input.actorUserId,
+        displayName: String(actorResult.rows[0].display_name),
+        email: String(actorResult.rows[0].email),
+        providerTenantId: input.actorProviderTenantId,
+        providerObjectId: input.actorProviderObjectId,
+        authenticationMethod: "microsoft_entra",
+      };
+      responderUserId = input.actorUserId;
+      responderProviderTenantId = input.actorProviderTenantId;
+      responderProviderObjectId = input.actorProviderObjectId;
+      reviewSessionId = null;
+    }
     if (assignedApprovers.length === 0) return { outcome: "approver_not_found" };
     const eligibleAssignedApprover = assignedApprovers.find((approver) =>
         approvalState.eligibleApprovers.some(
@@ -2849,21 +3960,6 @@ export async function internalRecordIdentityBoundGateReviewResponse(input: {
         : { outcome: "not_eligible" };
     }
     const gateApproverId = eligibleAssignedApprover.gateApproverId;
-    const actorResult = await client.query(
-      `SELECT app_user.id, app_user.display_name, app_user.email
-       FROM app_user
-       JOIN user_identity ON user_identity.user_id = app_user.id
-       WHERE app_user.id = $1 AND app_user.status = 'active'
-         AND user_identity.provider = 'microsoft'
-         AND user_identity.provider_tenant_id = $2
-         AND user_identity.provider_object_id = $3`,
-      [
-        input.actorUserId,
-        input.actorProviderTenantId,
-        input.actorProviderObjectId,
-      ],
-    );
-    if (actorResult.rowCount === 0) return { outcome: "approver_not_found" };
     const now = new Date().toISOString();
     const transition = recordGateReviewResponse(
       currentGate,
@@ -2876,13 +3972,6 @@ export async function internalRecordIdentityBoundGateReviewResponse(input: {
       now,
     );
     if (transition.outcome !== "recorded") return transition;
-    const actor: GateReviewActorSnapshot = {
-      userId: input.actorUserId,
-      displayName: String(actorResult.rows[0].display_name),
-      email: String(actorResult.rows[0].email),
-      providerTenantId: input.actorProviderTenantId,
-      providerObjectId: input.actorProviderObjectId,
-    };
     const respondingApprover = transition.reviewCycle.approvers.find(
       (candidate) => candidate.gateApproverId === gateApproverId,
     );
@@ -2903,18 +3992,21 @@ export async function internalRecordIdentityBoundGateReviewResponse(input: {
        `INSERT INTO gate_review_response (
           review_cycle_id, gate_approver_id, outcome, responded_at,
           responded_by, responded_by_user_id, comment,
-          responder_provider_tenant_id, responder_provider_object_id
-        ) VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9)`,
+          responder_provider_tenant_id, responder_provider_object_id,
+          authentication_method, review_session_id
+        ) VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11)`,
       [
         input.reviewCycleId,
         gateApproverId,
         input.outcome,
         now,
         JSON.stringify(actor),
-        input.actorUserId,
+        responderUserId,
         respondingApprover.response.comment,
-        input.actorProviderTenantId,
-        input.actorProviderObjectId,
+        responderProviderTenantId,
+        responderProviderObjectId,
+        input.authenticationMethod === "email_otp" ? "email_otp" : null,
+        reviewSessionId,
       ],
     );
     await client.query(
@@ -2941,6 +4033,24 @@ export async function internalRecordIdentityBoundGateReviewResponse(input: {
       input.gateId,
       currentGate.status,
     ]);
+    if (transition.completion === "approved_with_actions") {
+      await reconcileGateFollowUpStatus(
+        client,
+        input.projectId,
+        input.gateId,
+        transition.acceptedActionIds[0],
+        {
+          userId: actor.userId,
+          displayName: actor.displayName,
+          providerTenantId: actor.providerTenantId,
+          providerObjectId: actor.providerObjectId,
+          accessClass: actor.authenticationMethod === "email_otp"
+            ? "external_reviewer"
+            : null,
+          authenticationMethod: actor.authenticationMethod ?? null,
+        },
+      );
+    }
     if (
       transition.completion === "approved" ||
       transition.completion === "approved_with_actions"
@@ -3013,38 +4123,15 @@ export async function getAssignedGateReview(
        FROM gate_review_cycle_approver AS approver
        JOIN gate_review_cycle AS cycle ON cycle.id = approver.review_cycle_id
        JOIN gate ON gate.id = cycle.gate_id
-       WHERE approver.review_cycle_id = $1
-         AND approver.expected_provider_tenant_id = $2
-         AND approver.expected_provider_object_id = $3
-       FOR UPDATE OF approver`,
-      [reviewCycleId, actor.providerTenantId, actor.providerObjectId],
+        WHERE approver.review_cycle_id = $1
+          AND approver.assigned_user_id = $4
+          AND approver.expected_provider_tenant_id = $2
+          AND approver.expected_provider_object_id = $3
+        FOR UPDATE OF approver`,
+      [reviewCycleId, actor.providerTenantId, actor.providerObjectId, actor.id],
     );
     if (assignment.rowCount !== 1) return null;
     const row = assignment.rows[0];
-    if (row.assigned_user_id == null) {
-      if (row.status !== "awaiting_approval") return null;
-      const claimed = await client.query(
-        `UPDATE gate_review_cycle_approver
-         SET assigned_user_id = $2
-         WHERE review_cycle_id = $1
-           AND gate_approver_id = $3
-           AND assigned_user_id IS NULL`,
-        [reviewCycleId, actor.id, row.gate_approver_id],
-      );
-      if (claimed.rowCount !== 1) return null;
-      await insertAuditEvent(client, actor, String(row.project_id), {
-        eventType: "gate_review.assignment_claimed",
-        resourceType: "gate_review_cycle",
-        resourceId: reviewCycleId,
-        metadata: {
-          gateId: String(row.gate_id),
-          packageId: row.package_id == null ? null : String(row.package_id),
-          gateApproverId: String(row.gate_approver_id),
-        },
-      });
-    } else if (String(row.assigned_user_id) !== actor.id) {
-      return null;
-    }
 
     const projectId = String(row.project_id);
     const packageId = row.package_id == null ? null : String(row.package_id);
@@ -3089,6 +4176,48 @@ export async function recordAssignedGateReviewResponse(input: {
           gateId: assigned.gateId,
           packageId: assigned.packageId,
           gateApproverId: assigned.assignedApprover.gateApproverId,
+        },
+      });
+    }
+    return result == null ? null : { ...result, assigned };
+  });
+}
+
+export async function recordOtpGateReviewResponse(input: {
+  reviewAccessId: string;
+  sessionToken: string;
+  outcome: GateReviewResponseInput["outcome"];
+  comment: string;
+}) {
+  return withOperationalTransaction(async (client) => {
+    const assigned = await getOtpAssignedGateReview(
+      input.reviewAccessId,
+      input.sessionToken,
+    );
+    if (!assigned) return null;
+    const result = await internalRecordIdentityBoundGateReviewResponse({
+      projectId: assigned.projectId,
+      packageId: assigned.packageId,
+      gateId: assigned.gateId,
+      reviewCycleId: assigned.reviewCycle.id,
+      gateApproverId: assigned.assignedApprover.gateApproverId,
+      reviewSessionId: assigned.sessionId,
+      authenticationMethod: "email_otp",
+      outcome: input.outcome,
+      comment: input.comment,
+    });
+    if (result?.outcome === "recorded") {
+      await insertPublicGateReviewAudit(client, assigned.projectId, {
+        eventType: "gate_review.responded",
+        resourceType: "gate_review_cycle",
+        resourceId: assigned.reviewCycle.id,
+        metadata: {
+          gateId: assigned.gateId,
+          packageId: assigned.packageId,
+          gateApproverId: assigned.assignedApprover.gateApproverId,
+          authenticationMethod: "email_otp",
+          reviewSessionId: assigned.sessionId,
+          outcome: input.outcome,
         },
       });
     }

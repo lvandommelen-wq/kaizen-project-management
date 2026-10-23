@@ -80,6 +80,9 @@ export default async function ProjectDetailPage({
               Edit project
             </Link>
           ) : null}
+          <Link href={`/projects/${project.id}/applicability`} className="button-secondary">
+            Applicability review
+          </Link>
           <Link href={`/projects/${project.id}/actions`} className="button-secondary">
             Actions
           </Link>

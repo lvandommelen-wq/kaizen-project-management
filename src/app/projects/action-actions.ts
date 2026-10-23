@@ -145,7 +145,7 @@ export async function closeProjectActionAction(
       resourceType: "action",
       resourceId: actionId,
     },
-    operation: async () => {
+    operation: async (authenticatedActor) => {
       const context = await getActionContext(projectId);
       const parsed = parseActionTransitionFormData(formData);
       const action = await closeProjectAction(
@@ -153,6 +153,7 @@ export async function closeProjectActionAction(
         actionId,
         parsed.actor,
         parsed.comment,
+        authenticatedActor,
       );
       return { context, action };
     },
@@ -177,7 +178,7 @@ export async function reopenProjectActionAction(
       resourceType: "action",
       resourceId: actionId,
     },
-    operation: async () => {
+    operation: async (authenticatedActor) => {
       const context = await getActionContext(projectId);
       const parsed = parseActionTransitionFormData(formData);
       const action = await reopenProjectAction(
@@ -186,6 +187,7 @@ export async function reopenProjectActionAction(
         parseReopenStatus(formData),
         parsed.actor,
         parsed.comment,
+        authenticatedActor,
       );
       return { context, action };
     },

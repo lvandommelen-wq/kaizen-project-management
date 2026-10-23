@@ -1,12 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { Gate } from "./gates";
+import type { Applicability, Gate } from "./gates";
 import type { GovernanceGateTemplate } from "./governance-templates";
 import { getOperationalDataBackend } from "./operational/backend";
 import * as postgresOperational from "./operational/postgres";
 
-export const deliverableStatuses = ["not_started", "in_progress", "completed", "not_applicable"] as const;
+export const deliverableStatuses = ["not_started", "in_progress", "completed"] as const;
 export const deliverableScopeLevels = ["project", "package"] as const;
 
 export type DeliverableStatus = (typeof deliverableStatuses)[number];
@@ -23,6 +23,13 @@ export type Deliverable = {
   title: string;
   description: string;
   status: DeliverableStatus;
+  applicability: Applicability;
+  applicabilityJustification: string | null;
+  applicabilityDecidedAt: string | null;
+  applicabilityDecidedByUserId: string | null;
+  applicabilityDecidedByDisplayName: string | null;
+  applicabilityOrigin: "legacy" | "template" | "user";
+  applicabilityLocked: boolean;
   stageId: string;
   scopeLevel: DeliverableScopeLevel;
   createdAt: string;
@@ -31,14 +38,16 @@ export type Deliverable = {
 
 export type DeliverableInput = Omit<
   Deliverable,
-  "id" | "templateId" | "templateVersion" | "createdAt" | "updatedAt"
+  "id" | "templateId" | "templateVersion" | "createdAt" | "updatedAt" |
+  "applicability" | "applicabilityJustification" | "applicabilityDecidedAt" |
+  "applicabilityDecidedByUserId" | "applicabilityDecidedByDisplayName" |
+  "applicabilityOrigin" | "applicabilityLocked"
 >;
 
 export const deliverableStatusLabels: Record<DeliverableStatus, string> = {
   not_started: "Not Started",
   in_progress: "In Progress",
   completed: "Completed",
-  not_applicable: "Not Applicable",
 };
 
 const dataDirectory = path.join(process.cwd(), ".data");
@@ -91,6 +100,13 @@ export async function createDeliverable(input: DeliverableInput) {
     templateId: null,
     templateVersion: null,
     ...input,
+    applicability: "applicable",
+    applicabilityJustification: null,
+    applicabilityDecidedAt: now,
+    applicabilityDecidedByUserId: null,
+    applicabilityDecidedByDisplayName: null,
+    applicabilityOrigin: "user",
+    applicabilityLocked: false,
     createdAt: now,
     updatedAt: now,
   };
@@ -123,6 +139,7 @@ export async function updateDeliverable(deliverableId: string, input: Deliverabl
   const updatedDeliverable: Deliverable = {
     ...existingDeliverable,
     ...input,
+    description: existingDeliverable.description,
     updatedAt: new Date().toISOString(),
   };
 
@@ -156,26 +173,6 @@ export async function deleteDeliverable(
   return true;
 }
 
-export async function removeCriterionFromDeliverables(criterionId: string) {
-  if (getOperationalDataBackend() === "postgres") {
-    return;
-  }
-  const deliverables = await readDeliverablesFile();
-  let changed = false;
-
-  for (const deliverable of deliverables) {
-    if (deliverable.criterionIds.includes(criterionId)) {
-      deliverable.criterionIds = deliverable.criterionIds.filter((id) => id !== criterionId);
-      deliverable.updatedAt = new Date().toISOString();
-      changed = true;
-    }
-  }
-
-  if (changed) {
-    await writeDeliverablesFile(deliverables);
-  }
-}
-
 export async function ensureDefaultDeliverables<StageId extends string>(context: {
   projectId: string;
   packageId: string | null;
@@ -194,9 +191,11 @@ export async function ensureDefaultDeliverables<StageId extends string>(context:
     if (!gate) {
       continue;
     }
+    if (gate.status !== "not_submitted" && gate.status !== "returned_for_rework") {
+      continue;
+    }
 
     const defaultTemplateIds = new Set(template.deliverables.map((definition) => definition.id));
-    const currentCriterionIds = new Set(gate.criteria.map((criterion) => criterion.id));
     const seenDefaultTemplateIds = new Set<string>();
 
     for (let index = 0; index < deliverables.length; ) {
@@ -225,12 +224,8 @@ export async function ensureDefaultDeliverables<StageId extends string>(context:
         seenDefaultTemplateIds.add(existingDeliverable.templateId);
       }
 
-      const criterionIds = existingDeliverable.criterionIds.filter((criterionId) =>
-        currentCriterionIds.has(criterionId),
-      );
-
-      if (criterionIds.length !== existingDeliverable.criterionIds.length) {
-        existingDeliverable.criterionIds = criterionIds;
+      if (existingDeliverable.criterionIds.length > 0) {
+        existingDeliverable.criterionIds = [];
         existingDeliverable.updatedAt = new Date().toISOString();
         changed = true;
       }
@@ -240,9 +235,6 @@ export async function ensureDefaultDeliverables<StageId extends string>(context:
 
     for (const definition of template.deliverables) {
       const id = `${gate.id}:deliverable:${definition.id}`;
-      const defaultCriterionIds = (definition.criterionIds ?? [])
-        .map((templateId) => gate.criteria.find((criterion) => criterion.templateId === templateId)?.id)
-        .filter((criterionId): criterionId is string => Boolean(criterionId));
       const existingDeliverable = deliverables.find(
         (deliverable) =>
           deliverable.projectId === context.projectId &&
@@ -253,16 +245,21 @@ export async function ensureDefaultDeliverables<StageId extends string>(context:
       );
 
       if (existingDeliverable) {
-        const criterionIds = [...new Set([...existingDeliverable.criterionIds, ...defaultCriterionIds])];
+        const usesPreviousDefaultTitle = definition.previousTitles?.includes(
+          existingDeliverable.title,
+        ) ?? false;
 
         if (
           existingDeliverable.templateId !== definition.id ||
           existingDeliverable.templateVersion !== template.templateVersion ||
-          criterionIds.length !== existingDeliverable.criterionIds.length
+          usesPreviousDefaultTitle ||
+          existingDeliverable.description !== definition.description
         ) {
           existingDeliverable.templateId = definition.id;
           existingDeliverable.templateVersion = template.templateVersion;
-          existingDeliverable.criterionIds = criterionIds;
+          existingDeliverable.criterionIds = [];
+          if (usesPreviousDefaultTitle) existingDeliverable.title = definition.title;
+          existingDeliverable.description = definition.description;
           existingDeliverable.updatedAt = new Date().toISOString();
           changed = true;
         }
@@ -278,10 +275,17 @@ export async function ensureDefaultDeliverables<StageId extends string>(context:
         projectId: context.projectId,
         packageId: context.packageId,
         gateId: gate.id,
-        criterionIds: defaultCriterionIds,
+        criterionIds: [],
         title: definition.title,
         description: definition.description,
         status: "not_started",
+        applicability: "applicable",
+        applicabilityJustification: null,
+        applicabilityDecidedAt: null,
+        applicabilityDecidedByUserId: null,
+        applicabilityDecidedByDisplayName: null,
+        applicabilityOrigin: "template",
+        applicabilityLocked: definition.applicabilityLocked ?? false,
         stageId: gate.stageId,
         scopeLevel: context.packageId ? "package" : "project",
         createdAt: now,
@@ -329,7 +333,6 @@ export function parseDeliverableFormData(
     packageId: string | null;
     gateId: string;
     stageId: string;
-    validCriterionIds: string[];
   },
 ): DeliverableInput {
   const title = String(formData.get("title") ?? "").trim();
@@ -343,19 +346,13 @@ export function parseDeliverableFormData(
     throw new Error("Invalid Deliverable status.");
   }
 
-  const validCriterionIds = new Set(context.validCriterionIds);
-  const criterionIds = formData
-    .getAll("criterionIds")
-    .map(String)
-    .filter((criterionId) => validCriterionIds.has(criterionId));
-
   return {
     projectId: context.projectId,
     packageId: context.packageId,
     gateId: context.gateId,
-    criterionIds,
+    criterionIds: [],
     title,
-    description: String(formData.get("description") ?? "").trim(),
+    description: "",
     status: status as DeliverableStatus,
     stageId: context.stageId,
     scopeLevel: context.packageId ? "package" : "project",
@@ -363,6 +360,7 @@ export function parseDeliverableFormData(
 }
 
 function normalizeDeliverable(deliverable: Partial<Deliverable>): Deliverable {
+  const legacyNotApplicable = (deliverable.status as string) === "not_applicable";
   const status = deliverableStatuses.includes(deliverable.status as DeliverableStatus)
     ? (deliverable.status as DeliverableStatus)
     : "not_started";
@@ -381,10 +379,20 @@ function normalizeDeliverable(deliverable: Partial<Deliverable>): Deliverable {
     projectId: deliverable.projectId ?? "",
     packageId: deliverable.packageId ?? null,
     gateId: deliverable.gateId ?? "",
-    criterionIds: Array.isArray(deliverable.criterionIds) ? deliverable.criterionIds.map(String) : [],
+    criterionIds: [],
     title: deliverable.title ?? "",
     description: deliverable.description ?? "",
     status,
+    applicability:
+      (deliverable.applicability as string) === "not_applicable" || legacyNotApplicable
+        ? "not_applicable"
+        : "applicable",
+    applicabilityJustification: deliverable.applicabilityJustification ?? null,
+    applicabilityDecidedAt: deliverable.applicabilityDecidedAt ?? null,
+    applicabilityDecidedByUserId: deliverable.applicabilityDecidedByUserId ?? null,
+    applicabilityDecidedByDisplayName: deliverable.applicabilityDecidedByDisplayName ?? null,
+    applicabilityOrigin: deliverable.applicabilityOrigin ?? "legacy",
+    applicabilityLocked: deliverable.applicabilityLocked ?? false,
     stageId: deliverable.stageId ?? "",
     scopeLevel,
     createdAt: deliverable.createdAt ?? now,

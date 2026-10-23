@@ -1,20 +1,17 @@
 import { notFound } from "next/navigation";
 import { GateDetail } from "@/app/projects/_components/gate-detail";
 import {
-  createProjectDeliverableAction,
   createProjectGateActionAction,
   createProjectGateApproverAction,
-  createProjectGateCriterionAction,
-  deleteProjectDeliverableAction,
+  confirmProjectGateMatrixReviewAction,
   deleteProjectGateApproverAction,
-  deleteProjectGateCriterionAction,
+  linkActiveGateReviewApproverUserAction,
   reopenProjectGateAction,
   respondToProjectGateReviewAction,
   retryProjectGateReviewInvitationAction,
   submitProjectGateForApprovalAction,
   updateProjectDeliverableAction,
   updateProjectGateApproverAction,
-  updateProjectGateCriterionAction,
   withdrawProjectGateSubmissionAction,
 } from "@/app/projects/gate-actions";
 import { getGateDeliverables } from "@/lib/deliverables";
@@ -22,6 +19,11 @@ import { getPackages } from "@/lib/packages";
 import { getGateActions } from "@/lib/project-actions";
 import { getProject, projectStageLabels } from "@/lib/projects";
 import { getCurrentProjectRole } from "@/lib/authorization";
+import { getActiveGateReviewIdentityLinkCandidates } from "@/lib/operational/postgres";
+import { getAwaitingGateReviewCycle, getGateSubmissionIssues } from "@/lib/gates";
+import { getOperationalDataBackend } from "@/lib/operational/backend";
+import { getApplicabilityReview, getGateMatrixReview } from "@/lib/applicability";
+import { getMatrixReviewSubmissionIssues } from "@/lib/matrix-reviews";
 
 export const dynamic = "force-dynamic";
 
@@ -42,8 +44,45 @@ export default async function ProjectGatePage({
   }
 
   const packages = await getPackages(project.id);
-  const deliverables = await getGateDeliverables(project.id, null, gate.id);
-  const gateActions = await getGateActions(project.id, gate.id);
+  const matrixReview = getOperationalDataBackend() === "postgres"
+    ? await getGateMatrixReview(project.id, null, gate.id)
+    : null;
+  if (getOperationalDataBackend() === "postgres" && !matrixReview) notFound();
+  const applicabilityReview = gate.stageId === "initiation" && getOperationalDataBackend() === "postgres"
+    ? await getApplicabilityReview(project.id, null)
+    : null;
+  const applicabilityGate = applicabilityReview?.gates.find(
+    (entry) => entry.gate.id === gate.id,
+  );
+  const readinessGate = applicabilityGate?.gate ?? gate;
+  const deliverables = applicabilityGate?.deliverables
+    ?? await getGateDeliverables(project.id, null, readinessGate.id);
+  const applicabilityEntryDeliverable = deliverables.find(
+    (deliverable) => deliverable.templateId === "project_stage_gate_applicability_matrix",
+  );
+  const gateActions = await getGateActions(project.id, readinessGate.id);
+  const submissionIssues = [
+    ...getGateSubmissionIssues(
+      readinessGate,
+      deliverables,
+      gateActions,
+      applicabilityReview ? {
+        scopeLabel: "Project",
+        items: applicabilityReview.gates.flatMap((entry) => entry.deliverables),
+      } : undefined,
+    ),
+    ...(matrixReview ? getMatrixReviewSubmissionIssues(matrixReview.state) : []),
+  ];
+  const awaitingCycle = getAwaitingGateReviewCycle(readinessGate);
+  const activeIdentityLinkCandidates = getOperationalDataBackend() === "postgres"
+    && access.role === "owner" && awaitingCycle
+    ? await getActiveGateReviewIdentityLinkCandidates({
+        projectId: project.id,
+        packageId: null,
+        gateId: readinessGate.id,
+        reviewCycleId: awaitingCycle.id,
+      })
+    : [];
   const submittedCycleNumber = parseCycleNumber(query.submitted);
 
   return (
@@ -51,9 +90,14 @@ export default async function ProjectGatePage({
       backHref={`/projects/${project.id}`}
       backLabel="Project"
       contextLabel={`${project.projectNumber} - ${project.name}`}
+      applicabilityHref={`/projects/${project.id}/applicability`}
+      applicabilityEntryDeliverableId={applicabilityEntryDeliverable?.id}
       actionRegisterHref={`/projects/${project.id}/actions`}
       approvalError={parseQueryValue(query.approvalError)}
       canEdit={access.role !== "viewer"}
+      canManageActiveIdentityLinks={access.role === "owner"}
+      canWithdrawSubmission={access.role === "owner"}
+      activeIdentityLinkCandidates={activeIdentityLinkCandidates}
       invitationFailureCount={parsePositiveInteger(query.invitationFailures)}
       approvalResponseAction={respondToProjectGateReviewAction.bind(
         null,
@@ -61,17 +105,19 @@ export default async function ProjectGatePage({
         gate.id,
       )}
       createApproverAction={createProjectGateApproverAction.bind(null, project.id, gate.id)}
-      createCriterionAction={createProjectGateCriterionAction.bind(null, project.id, gate.id)}
-      createDeliverableAction={createProjectDeliverableAction.bind(null, project.id, gate.id)}
+      confirmMatrixReviewAction={confirmProjectGateMatrixReviewAction.bind(
+        null,
+        project.id,
+        gate.id,
+      )}
       createGateActionAction={createProjectGateActionAction.bind(null, project.id, gate.id)}
       deleteApproverAction={deleteProjectGateApproverAction.bind(null, project.id, gate.id)}
-      deleteCriterionAction={deleteProjectGateCriterionAction.bind(null, project.id, gate.id)}
-      deleteDeliverableAction={deleteProjectDeliverableAction.bind(null, project.id, gate.id)}
       deliverables={deliverables}
-      gate={gate}
+      gate={readinessGate}
       gateActions={gateActions}
       gateActionPackageId={null}
       isCurrentGate={gate.stageId === project.currentStage}
+      matrixReview={matrixReview?.state ?? null}
       packages={packages.map((projectPackage) => ({
         id: projectPackage.id,
         label: `${projectPackage.packageCode} - ${projectPackage.packageName}`,
@@ -82,13 +128,20 @@ export default async function ProjectGatePage({
         project.id,
         gate.id,
       )}
+      linkActiveIdentityAction={linkActiveGateReviewApproverUserAction.bind(
+        null,
+        project.id,
+        null,
+        gate.id,
+      )}
       scopeLabel="Project"
       stageLabel={projectStageLabels[gate.stageId]}
       submissionAction={submitProjectGateForApprovalAction.bind(null, project.id, gate.id)}
+      submissionError={parseQueryValue(query.submissionError)}
+      submissionIssues={submissionIssues}
       submittedCycleNumber={submittedCycleNumber}
       selectedReviewCycleId={parseQueryValue(query.reviewCycle)}
       updateApproverAction={updateProjectGateApproverAction.bind(null, project.id, gate.id)}
-      updateCriterionAction={updateProjectGateCriterionAction.bind(null, project.id, gate.id)}
       updateDeliverableAction={updateProjectDeliverableAction.bind(null, project.id, gate.id)}
       withdrawSubmissionAction={withdrawProjectGateSubmissionAction.bind(null, project.id, gate.id)}
     />

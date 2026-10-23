@@ -68,6 +68,7 @@ const {
   completeGateReviewInvitationAttempt,
   createGateReviewCycle,
   recordGateReviewResponse,
+  withdrawGateReviewCycle,
 } = await import("../src/lib/gates.ts");
 const { sendEmail } = await import("../src/lib/email.ts");
 const {
@@ -162,9 +163,87 @@ test("Gate Review invitations follow approval levels and preserve attempt histor
   assert.ok(second.invitation);
 });
 
+test("Gate withdrawal requires a reason and preserves partial approval evidence", () => {
+  const gate = createTestGate();
+  const cycle = createGateReviewCycle({
+    id: "withdrawal-cycle-1",
+    submittedAt: "2026-10-22T10:00:00.000Z",
+    submittedBy: { userId: "owner-1", displayName: "Project Owner", email: "owner@example.com" },
+    project: { id: "project-1", projectNumber: "PRJ-001", name: "Test Project" },
+    package: null,
+    gate,
+    stageLabel: "Initiation",
+    deliverables: [],
+    gateActions: [],
+  });
+  gate.reviewCycles.push(cycle);
+  gate.status = "submitted_for_approval";
+
+  assert.throws(
+    () => withdrawGateReviewCycle(gate, {
+      withdrawnAt: "2026-10-22T10:01:00.000Z",
+      withdrawnBy: { userId: "owner-1", displayName: "Project Owner", email: "owner@example.com" },
+      withdrawalReason: "   ",
+    }),
+    /withdrawal reason is required/i,
+  );
+  assert.equal(cycle.status, "awaiting_approval");
+
+  const response = recordGateReviewResponse(gate, {
+    reviewCycleId: cycle.id,
+    gateApproverId: cycle.approvers[0].gateApproverId,
+    outcome: "approved",
+    comment: "Approved with retained comment.",
+  }, "2026-10-22T10:02:00.000Z");
+  assert.equal(response.outcome, "recorded");
+  const frozenEvidence = structuredClone(cycle.frozenEvidence);
+  const approverHistory = structuredClone(cycle.approvers);
+
+  const withdrawal = withdrawGateReviewCycle(gate, {
+    withdrawnAt: "2026-10-22T10:03:00.000Z",
+    withdrawnBy: {
+      userId: "owner-1",
+      displayName: "Project Owner",
+      email: "owner@example.com",
+      providerTenantId: "tenant-1",
+      providerObjectId: "object-1",
+    },
+    withdrawalReason: "  Scope changed after submission.  ",
+  });
+  assert.equal(withdrawal.outcome, "withdrawn");
+  assert.equal(gate.status, "not_submitted");
+  assert.equal(cycle.status, "withdrawn");
+  assert.equal(cycle.withdrawalReason, "Scope changed after submission.");
+  assert.deepEqual(cycle.frozenEvidence, frozenEvidence);
+  assert.deepEqual(cycle.approvers, approverHistory);
+  assert.equal(recordGateReviewResponse(gate, {
+    reviewCycleId: cycle.id,
+    gateApproverId: cycle.approvers[1].gateApproverId,
+    outcome: "approved",
+    comment: "Must no longer be accepted.",
+  }, "2026-10-22T10:04:00.000Z").outcome, "not_submitted");
+
+  const nextCycle = createGateReviewCycle({
+    id: "withdrawal-cycle-2",
+    submittedAt: "2026-10-22T10:05:00.000Z",
+    submittedBy: { userId: "owner-1", displayName: "Project Owner", email: "owner@example.com" },
+    project: { id: "project-1", projectNumber: "PRJ-001", name: "Test Project" },
+    package: null,
+    gate,
+    stageLabel: "Initiation",
+    deliverables: [],
+    gateActions: [],
+  });
+  assert.equal(nextCycle.cycleNumber, 2);
+  assert.equal(nextCycle.previousCycleId, cycle.id);
+  assert.ok(nextCycle.approvers.every((approver) => approver.response === null));
+});
+
 test("invitation dispatcher deduplicates recipients and records safe results", async () => {
   const previousBaseUrl = process.env.APP_BASE_URL;
+  const previousBackend = process.env.OPERATIONAL_DATA_BACKEND;
   process.env.APP_BASE_URL = "https://kaizen.example/";
+  process.env.OPERATIONAL_DATA_BACKEND = "postgres";
   const cycle = createDispatchCycle();
   const sentMessages = [];
   const completions = [];
@@ -197,14 +276,16 @@ test("invitation dispatcher deduplicates recipients and records safe results", a
     assert.equal(sentMessages.length, 1);
     assert.equal(sentMessages[0].to, "approver@example.com");
     assert.equal(sentMessages[0].idempotencyKey, "gate-review-invitation/attempt-1");
-    assert.match(sentMessages[0].text, /This link opens the frozen Review Cycle/);
+    assert.match(sentMessages[0].text, /request an email verification code/);
     assert.match(sentMessages[0].html, /Hello &lt;Approver&gt;/);
     assert.match(
       sentMessages[0].text,
-      /https:\/\/kaizen\.example\/projects\/project%20%2F%201\/gates\/gate%20%2F%201\?reviewCycle=cycle-1#review-cycle-cycle-1/,
+      /https:\/\/kaizen\.example\/reviews\/access\/10000000-0000-4000-8000-000000000001/,
     );
+    assert.doesNotMatch(sentMessages[0].text, /project%20%2F%201|reviewCycle=/);
   } finally {
     restoreEnvironment("APP_BASE_URL", previousBaseUrl);
+    restoreEnvironment("OPERATIONAL_DATA_BACKEND", previousBackend);
   }
 });
 
@@ -381,6 +462,8 @@ function claimedInvitation(cycle) {
     reviewCycle: cycle,
     approver: {
       gateApproverId: "approver-1",
+      authenticationMethod: "email_otp",
+      reviewAccessId: "10000000-0000-4000-8000-000000000001",
       name: "<Approver>",
       email: "approver@example.com",
       approvalRole: "Technical Approver",

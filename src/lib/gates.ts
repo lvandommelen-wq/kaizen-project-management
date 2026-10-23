@@ -6,7 +6,12 @@ export const gateStatuses = [
   "returned_for_rework",
 ] as const;
 export const pmGateDecisions = ["approved", "approved_with_actions"] as const;
-export const gateCriterionStatuses = ["pending", "completed", "not_applicable"] as const;
+export const gateCriterionStatuses = ["pending", "completed"] as const;
+export const applicabilityValues = ["applicable", "not_applicable"] as const;
+export const historicalApplicabilityValues = [
+  ...applicabilityValues,
+  "to_be_determined",
+] as const;
 export const gateReviewCycleStatuses = [
   "awaiting_approval",
   "withdrawn",
@@ -22,11 +27,13 @@ export const gateReviewInvitationAttemptStatuses = [
   "indeterminate",
 ] as const;
 export const gateReviewBaselineTypes = ["scope", "cost", "schedule", "other"] as const;
-export const gateReviewCycleSchemaVersion = 3 as const;
+export const gateReviewCycleSchemaVersion = 7 as const;
 
 export type GateStatus = (typeof gateStatuses)[number];
 export type PmGateDecision = (typeof pmGateDecisions)[number];
 export type GateCriterionStatus = (typeof gateCriterionStatuses)[number];
+export type Applicability = (typeof applicabilityValues)[number];
+export type HistoricalApplicability = (typeof historicalApplicabilityValues)[number];
 export type GateReviewCycleStatus = (typeof gateReviewCycleStatuses)[number];
 export type GateReviewApproverResponseOutcome = (typeof gateReviewApproverResponseOutcomes)[number];
 export type GateReviewInvitationAttemptStatus =
@@ -38,18 +45,35 @@ export type GateCriterion = {
   templateId: string | null;
   description: string;
   status: GateCriterionStatus;
+  applicability: Applicability;
+  applicabilityJustification: string | null;
+  applicabilityDecidedAt: string | null;
+  applicabilityDecidedByUserId: string | null;
+  applicabilityDecidedByDisplayName: string | null;
+  applicabilityOrigin: "legacy" | "template" | "user";
+  applicabilityLocked: boolean;
 };
 
 export type GateApprover = {
   id: string;
   name: string;
   email: string;
+  organizationName?: string | null;
   roleFunction: string;
   approvalRole: string;
   approvalLevel: number;
+  identityVerification?: "required" | "verified";
   assignedUserId?: string | null;
   expectedProviderTenantId?: string | null;
   expectedProviderObjectId?: string | null;
+};
+
+export type VerifiedApproverUser = {
+  id: string;
+  displayName: string;
+  email: string;
+  organizationName: string | null;
+  accessClass: "internal" | "external_reviewer";
 };
 
 export type GateReviewActorSnapshot = {
@@ -58,6 +82,8 @@ export type GateReviewActorSnapshot = {
   email: string | null;
   providerTenantId?: string | null;
   providerObjectId?: string | null;
+  authenticationMethod?: "microsoft_entra" | "email_otp";
+  reviewSessionId?: string | null;
 };
 
 export type GateReviewProjectSnapshot = {
@@ -83,7 +109,9 @@ export type GateReviewCriterionSnapshot = {
   criterionId: string;
   templateId: string | null;
   description: string;
-  status: GateCriterionStatus | "satisfied";
+  status: GateCriterionStatus | "not_applicable" | "satisfied";
+  applicability?: HistoricalApplicability;
+  applicabilityJustification?: string | null;
 };
 
 export type GateReviewDeliverableSnapshot = {
@@ -93,6 +121,8 @@ export type GateReviewDeliverableSnapshot = {
   title: string;
   description: string;
   status: "not_started" | "in_progress" | "completed" | "not_applicable";
+  applicability?: HistoricalApplicability;
+  applicabilityJustification?: string | null;
   criterionIds: string[];
 };
 
@@ -130,6 +160,36 @@ export type GateReviewFrozenEvidence = {
   acceptedActions: GateReviewActionSnapshot[];
   documents: GateReviewDocumentSnapshot[];
   baselines: GateReviewBaselineSnapshot[];
+  applicabilityMatrix?: ApplicabilityMatrixSnapshot | null;
+  matrixReviewConfirmation?: import("./matrix-reviews").MatrixReviewConfirmation | null;
+};
+
+export type ApplicabilityMatrixItemSnapshot = {
+  itemType: "criterion" | "deliverable";
+  itemId: string;
+  templateId: string | null;
+  source: "default" | "custom";
+  title: string;
+  description: string;
+  applicability: HistoricalApplicability;
+  justification: string | null;
+  decidedAt: string | null;
+  decidedBy: string | null;
+};
+
+export type ApplicabilityMatrixGateSnapshot = {
+  stageId: string;
+  stageLabel: string;
+  gateId: string;
+  gateName: string;
+  items: ApplicabilityMatrixItemSnapshot[];
+};
+
+export type ApplicabilityMatrixSnapshot = {
+  scopeLevel: "project" | "package";
+  scopeId: string;
+  generatedAt: string;
+  gates: ApplicabilityMatrixGateSnapshot[];
 };
 
 export type GateReviewApproverResponse = {
@@ -177,12 +237,14 @@ export type GateReviewApproverSnapshot = {
   assignedUserId?: string | null;
   expectedProviderTenantId?: string | null;
   expectedProviderObjectId?: string | null;
+  authenticationMethod?: "email_otp" | null;
+  reviewAccessId?: string | null;
   response: GateReviewApproverResponse | null;
   invitation: GateReviewInvitation | null;
 };
 
 export type GateReviewCycle = {
-  schemaVersion: typeof gateReviewCycleSchemaVersion;
+  schemaVersion: number;
   id: string;
   cycleNumber: number;
   previousCycleId: string | null;
@@ -209,7 +271,10 @@ export type GateSubmissionDeliverable = {
   templateVersion: number | null;
   title: string;
   description: string;
-  status: GateReviewDeliverableSnapshot["status"];
+  status: "not_started" | "in_progress" | "completed";
+  applicability: Applicability;
+  applicabilityJustification: string | null;
+  applicabilityOrigin: "legacy" | "template" | "user";
   criterionIds: string[];
 };
 
@@ -229,13 +294,22 @@ export type GateSubmissionIssue = {
     | "awaiting_approval"
     | "no_approvers"
     | "invalid_approvers"
-    | "invalid_approver_identities"
-    | "invalid_criteria"
-    | "incomplete_criteria"
+    | "missing_applicability_justification"
     | "invalid_deliverables"
+    | "missing_acceptance_requirements"
     | "incomplete_deliverables"
-    | "invalid_actions";
+    | "invalid_actions"
+    | "matrix_review_confirmation_required";
   message: string;
+};
+
+export type GateSubmissionScopeApplicability = {
+  scopeLabel: "Project" | "Package";
+  items: Array<{
+    applicability: Applicability;
+    applicabilityJustification: string | null;
+    applicabilityOrigin: "legacy" | "template" | "user";
+  }>;
 };
 
 export type CreateGateReviewCycleInput = {
@@ -248,12 +322,14 @@ export type CreateGateReviewCycleInput = {
   stageLabel: string;
   deliverables: GateSubmissionDeliverable[];
   gateActions: GateSubmissionAction[];
+  applicabilityMatrix?: ApplicabilityMatrixSnapshot | null;
+  matrixReviewConfirmation?: import("./matrix-reviews").MatrixReviewConfirmation | null;
 };
 
 export type WithdrawGateReviewCycleInput = {
   withdrawnAt: string;
   withdrawnBy: GateReviewActorSnapshot;
-  withdrawalReason?: string | null;
+  withdrawalReason: string;
 };
 
 export type GateReviewResponseInput = {
@@ -305,6 +381,7 @@ export type GateCriterionDefinition = {
   id: string;
   description: string;
   previousDescriptions?: readonly string[];
+  applicabilityLocked?: boolean;
 };
 
 export type GateDefinition<StageId extends string> = {
@@ -327,11 +404,18 @@ export const gateStatusLabels: Record<GateStatus, string> = {
 export const gateCriterionStatusLabels: Record<GateCriterionStatus, string> = {
   pending: "Pending",
   completed: "Completed",
+};
+
+export const applicabilityLabels: Record<HistoricalApplicability, string> = {
+  applicable: "Applicable",
   not_applicable: "Not Applicable",
+  to_be_determined: "To Be Determined",
 };
 
 export function getGateCriterionStatusLabel(status: GateReviewCriterionSnapshot["status"]) {
-  return status === "satisfied" ? "Completed" : gateCriterionStatusLabels[status];
+  if (status === "satisfied") return "Completed";
+  if (status === "not_applicable") return "Not Applicable";
+  return gateCriterionStatusLabels[status];
 }
 
 export const gateReviewCycleStatusLabels: Record<GateReviewCycleStatus, string> = {
@@ -342,8 +426,11 @@ export const gateReviewCycleStatusLabels: Record<GateReviewCycleStatus, string> 
   approved_with_actions: "Approved with Actions",
 };
 
-export type GateCriterionInput = Omit<GateCriterion, "id" | "templateId">;
-export type GateApproverInput = Omit<GateApprover, "id">;
+export type GateCriterionInput = Pick<GateCriterion, "description" | "status">;
+export type GateApproverInput = Pick<
+  GateApprover,
+  "name" | "email" | "organizationName" | "roleFunction" | "approvalRole" | "approvalLevel"
+>;
 
 export type GateSubmissionResult<Entity> =
   | { outcome: "submitted"; entity: Entity; reviewCycle: GateReviewCycle }
@@ -353,7 +440,6 @@ export type GateSubmissionResult<Entity> =
 
 export type GateWithdrawalResult<Entity> =
   | { outcome: "withdrawn"; entity: Entity; reviewCycle: GateReviewCycle }
-  | { outcome: "responses_recorded" }
   | { outcome: "not_submitted" }
   | { outcome: "not_current" };
 
@@ -381,12 +467,7 @@ export function createGates<StageId extends string>(
     status: "not_submitted",
     approvers: [],
     reviewCycles: [],
-    criteria: (definition.criteria ?? []).map((criterion) => ({
-      id: `${scopeId}:${definition.id}:${criterion.id}`,
-      templateId: criterion.id,
-      description: criterion.description,
-      status: "pending",
-    })),
+    criteria: [],
   }));
 }
 
@@ -398,7 +479,6 @@ export function normalizeGates<StageId extends string>(
   return definitions.map((definition) => {
     const id = `${scopeId}:${definition.id}`;
     const existingGate = gates?.find((gate) => gate.id === id || gate.stageId === definition.stageId);
-    const existingCriteria = existingGate?.criteria;
     const reviewCycles = normalizeGateReviewCycles(existingGate?.reviewCycles);
     const status = normalizeGateStatus(existingGate?.status, reviewCycles);
 
@@ -410,7 +490,7 @@ export function normalizeGates<StageId extends string>(
       status,
       approvers: normalizeGateApprovers(id, existingGate?.approvers),
       reviewCycles,
-      criteria: normalizeGateCriteria(id, existingCriteria, definition.criteria),
+      criteria: [],
     };
   });
 }
@@ -445,14 +525,9 @@ export function gatesRequireTemplateUpdate<StageId extends string>(
       return true;
     }
 
-    if ((gate.criteria ?? []).some((criterion) => (criterion.status as string) === "satisfied")) {
-      return true;
-    }
-
     if (
       gate.reviewCycles.some(
         (cycle) =>
-          cycle.schemaVersion !== gateReviewCycleSchemaVersion ||
           (cycle.status as string) === "submitted" ||
           !cycle.gate.stageLabel ||
           !("withdrawnAt" in cycle) ||
@@ -463,16 +538,7 @@ export function gatesRequireTemplateUpdate<StageId extends string>(
       return true;
     }
 
-    const expectedTemplateIds = new Set((definition.criteria ?? []).map((criterion) => criterion.id));
-    const defaultTemplateIds = (gate.criteria ?? [])
-      .map((criterion) => criterion.templateId)
-      .filter((templateId): templateId is string => templateId != null);
-
-    return (
-      defaultTemplateIds.length !== expectedTemplateIds.size ||
-      new Set(defaultTemplateIds).size !== defaultTemplateIds.length ||
-      defaultTemplateIds.some((templateId) => !expectedTemplateIds.has(templateId))
-    );
+    return false;
   });
 }
 
@@ -505,46 +571,30 @@ export function parseGateCriterionFormData(formData: FormData): GateCriterionInp
 }
 
 export function parseGateApproverFormData(formData: FormData): GateApproverInput {
-  const input = {
-    name: String(formData.get("name") ?? "").trim(),
-    email: String(formData.get("email") ?? "").trim(),
-    roleFunction: String(formData.get("roleFunction") ?? "").trim(),
-    approvalRole: String(formData.get("approvalRole") ?? "").trim(),
-  };
+  const name = String(formData.get("name") ?? "").trim();
+  const email = String(formData.get("email") ?? "").trim();
+  const organizationName = String(formData.get("organizationName") ?? "").trim() || null;
+  const roleFunction = String(formData.get("roleFunction") ?? "").trim();
+  const approvalRole = String(formData.get("approvalRole") ?? "").trim();
   const approvalLevelValue = String(formData.get("approvalLevel") ?? "").trim();
   const approvalLevel = Number(approvalLevelValue);
 
-  if (!input.name || !input.email || !input.roleFunction || !input.approvalRole) {
-    throw new Error("Name, email address, role / function, and approval role are required.");
+  if (!name || !email || !roleFunction || !approvalRole) {
+    throw new Error("Name, email address, Role / Function and Gate Approval Role are required.");
   }
-
-  if (!/^[^\s@]+@[^\s@]+$/.test(input.email)) {
-    throw new Error("Enter a valid email address.");
-  }
-
+  if (!/^[^\s@]+@[^\s@]+$/.test(email)) throw new Error("Enter a valid email address.");
   if (!approvalLevelValue || !Number.isInteger(approvalLevel) || approvalLevel < 1) {
     throw new Error("Approval Level must be a positive integer.");
   }
 
   return {
-    ...input,
+    name,
+    email,
+    organizationName,
+    roleFunction,
+    approvalRole,
     approvalLevel,
-    assignedUserId: null,
-    expectedProviderTenantId: null,
-    expectedProviderObjectId: normalizeOptionalUuid(
-      String(formData.get("providerObjectId") ?? ""),
-      "Microsoft Entra Object ID",
-    ),
   };
-}
-
-function normalizeOptionalUuid(value: string, label: string) {
-  const normalized = value.trim().toLowerCase();
-  if (!normalized) return null;
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(normalized)) {
-    throw new Error(`${label} must be a UUID.`);
-  }
-  return normalized;
 }
 
 export function getAwaitingGateReviewCycle(gate: Gate) {
@@ -554,25 +604,25 @@ export function getAwaitingGateReviewCycle(gate: Gate) {
 }
 
 export function canWithdrawGateReviewCycle(cycle: GateReviewCycle) {
-  return cycle.status === "awaiting_approval" && cycle.approvers.every((approver) => approver.response === null);
+  return cycle.status === "awaiting_approval";
 }
 
 export function withdrawGateReviewCycle(gate: Gate, input: WithdrawGateReviewCycleInput) {
+  const withdrawalReason = input.withdrawalReason.trim();
+  if (!withdrawalReason) {
+    throw new Error("A withdrawal reason is required.");
+  }
   const reviewCycle = getAwaitingGateReviewCycle(gate);
 
   if (gate.status !== "submitted_for_approval" || !reviewCycle) {
     return { outcome: "not_submitted" as const };
   }
 
-  if (!canWithdrawGateReviewCycle(reviewCycle)) {
-    return { outcome: "responses_recorded" as const };
-  }
-
   reviewCycle.status = "withdrawn";
   reviewCycle.completedAt = input.withdrawnAt;
   reviewCycle.withdrawnAt = input.withdrawnAt;
   reviewCycle.withdrawnBy = { ...input.withdrawnBy };
-  reviewCycle.withdrawalReason = input.withdrawalReason ?? null;
+  reviewCycle.withdrawalReason = withdrawalReason;
   gate.status = "not_submitted";
 
   return { outcome: "withdrawn" as const, reviewCycle };
@@ -821,6 +871,7 @@ export function getGateSubmissionIssues(
   gate: Gate,
   deliverables: GateSubmissionDeliverable[],
   gateActions: GateSubmissionAction[],
+  scopeApplicability?: GateSubmissionScopeApplicability,
 ): GateSubmissionIssue[] {
   const issues: GateSubmissionIssue[] = [];
 
@@ -851,32 +902,18 @@ export function getGateSubmissionIssues(
   ) {
     issues.push({
       code: "invalid_approvers",
-      message: "Every Approver must have valid identity details, an Approval Role, and a positive Approval Level.",
+      message: "Every Approver must have a name, valid email address, Role / Function, Gate Approval Role, and positive Approval Level.",
     });
   }
 
-  if (gate.criteria.some((criterion) => !gateCriterionStatuses.includes(criterion.status))) {
-    issues.push({
-      code: "invalid_criteria",
-      message: "One or more Gate Criteria have an invalid status.",
-    });
-  }
+  issues.push(...getScopeApplicabilitySubmissionIssues(
+    scopeApplicability ?? { items: deliverables },
+  ));
 
-  const incompleteCriteria = gate.criteria.filter(
-    (criterion) => criterion.status !== "completed" && criterion.status !== "not_applicable",
-  );
-  if (incompleteCriteria.length > 0) {
-    issues.push({
-      code: "incomplete_criteria",
-      message: `${incompleteCriteria.length} Gate ${incompleteCriteria.length === 1 ? "Criterion is" : "Criteria are"} still pending.`,
-    });
-  }
-
-  const validDeliverableStatuses = new Set<GateReviewDeliverableSnapshot["status"]>([
+  const validDeliverableStatuses = new Set<GateSubmissionDeliverable["status"]>([
     "not_started",
     "in_progress",
     "completed",
-    "not_applicable",
   ]);
   if (deliverables.some((deliverable) => !validDeliverableStatuses.has(deliverable.status))) {
     issues.push({
@@ -885,8 +922,18 @@ export function getGateSubmissionIssues(
     });
   }
 
+  const missingDefaultAcceptanceRequirements = deliverables.filter(
+    (deliverable) => deliverable.templateId !== null && !deliverable.description.trim(),
+  );
+  if (missingDefaultAcceptanceRequirements.length > 0) {
+    issues.push({
+      code: "missing_acceptance_requirements",
+      message: `${missingDefaultAcceptanceRequirements.length} default ${missingDefaultAcceptanceRequirements.length === 1 ? "Deliverable needs" : "Deliverables need"} acceptance requirements before submission.`,
+    });
+  }
+
   const incompleteDeliverables = deliverables.filter(
-    (deliverable) => deliverable.status !== "completed" && deliverable.status !== "not_applicable",
+    (deliverable) => deliverable.applicability === "applicable" && deliverable.status !== "completed",
   );
   if (incompleteDeliverables.length > 0) {
     issues.push({
@@ -904,6 +951,34 @@ export function getGateSubmissionIssues(
     issues.push({
       code: "invalid_actions",
       message: `${invalidOpenActions.length} open Gate ${invalidOpenActions.length === 1 ? "Action needs" : "Actions need"} a description, assignee, and due date.`,
+    });
+  }
+
+  return issues;
+}
+
+export function getScopeApplicabilitySubmissionIssues(
+  input: GateSubmissionScopeApplicability | {
+    scopeLabel?: undefined;
+    items: GateSubmissionScopeApplicability["items"];
+  },
+): GateSubmissionIssue[] {
+  const issues: GateSubmissionIssue[] = [];
+  const scopePrefix = input.scopeLabel ? `${input.scopeLabel} ` : "";
+  const reviewInstruction = input.scopeLabel
+    ? ` Complete the ${input.scopeLabel} Applicability Review before submitting this Gate.`
+    : "";
+
+  const missingJustificationCount = input.items.filter((item) =>
+    item.applicability === "not_applicable" &&
+    item.applicabilityOrigin !== "legacy" &&
+    !item.applicabilityJustification?.trim()).length;
+  if (missingJustificationCount > 0) {
+    issues.push({
+      code: "missing_applicability_justification",
+      message: input.scopeLabel
+        ? `${missingJustificationCount} ${scopePrefix}Not Applicable ${missingJustificationCount === 1 ? "decision needs" : "decisions need"} a justification.${reviewInstruction}`
+        : `${missingJustificationCount} Not Applicable ${missingJustificationCount === 1 ? "decision needs" : "decisions need"} a justification.`,
     });
   }
 
@@ -939,12 +1014,7 @@ export function createGateReviewCycle(input: CreateGateReviewCycleInput): GateRe
     withdrawalReason: null,
     frozenEvidence: {
       frozenAt: input.submittedAt,
-      criteria: input.gate.criteria.map((criterion) => ({
-        criterionId: criterion.id,
-        templateId: criterion.templateId,
-        description: criterion.description,
-        status: criterion.status,
-      })),
+      criteria: [],
       deliverables: input.deliverables.map((deliverable) => ({
         deliverableId: deliverable.id,
         templateId: deliverable.templateId,
@@ -952,7 +1022,9 @@ export function createGateReviewCycle(input: CreateGateReviewCycleInput): GateRe
         title: deliverable.title,
         description: deliverable.description,
         status: deliverable.status,
-        criterionIds: [...deliverable.criterionIds],
+        applicability: deliverable.applicability,
+        applicabilityJustification: deliverable.applicabilityJustification,
+        criterionIds: [],
       })),
       acceptedActions: input.gateActions
         .filter((action) => action.status !== "closed")
@@ -968,6 +1040,8 @@ export function createGateReviewCycle(input: CreateGateReviewCycleInput): GateRe
         })),
       documents: [],
       baselines: [],
+      applicabilityMatrix: input.applicabilityMatrix ?? null,
+      matrixReviewConfirmation: input.matrixReviewConfirmation ?? null,
     },
     approvers: input.gate.approvers.map((approver) => ({
       gateApproverId: approver.id,
@@ -986,54 +1060,6 @@ export function createGateReviewCycle(input: CreateGateReviewCycleInput): GateRe
   };
   activateGateReviewInvitations(reviewCycle, input.submittedAt);
   return reviewCycle;
-}
-
-function normalizeGateCriteria(
-  gateId: string,
-  criteria: Partial<GateCriterion>[] | undefined,
-  definitions: GateCriterionDefinition[] = [],
-) {
-  const matchedCriterionIds = new Set<string>();
-  const templateCriteria = definitions.map((definition) => {
-    const id = `${gateId}:${definition.id}`;
-    const existingCriterion = criteria?.find(
-      (criterion) =>
-        criterion.templateId === definition.id ||
-        (criterion.templateId != null && criterion.id === id),
-    );
-
-    if (existingCriterion?.id) {
-      matchedCriterionIds.add(existingCriterion.id);
-    }
-
-    return normalizeGateCriterion(
-      existingCriterion,
-      existingCriterion?.id || id,
-      definition.description,
-      definition.id,
-      definition.previousDescriptions,
-    );
-  });
-  const templateIds = new Set(templateCriteria.map((criterion) => criterion.id));
-  const customCriteria = (criteria ?? [])
-    .filter(
-      (criterion) =>
-        criterion.id &&
-        criterion.templateId == null &&
-        !templateIds.has(criterion.id) &&
-        !matchedCriterionIds.has(criterion.id),
-    )
-    .map((criterion) =>
-      normalizeGateCriterion(
-        criterion,
-        criterion.id as string,
-        criterion.description ?? "",
-        criterion.templateId ?? null,
-      ),
-    )
-    .filter((criterion) => criterion.description);
-
-  return [...templateCriteria, ...customCriteria];
 }
 
 function normalizeGateApprovers(
@@ -1089,7 +1115,7 @@ function normalizeGateReviewCycles(reviewCycles: GateReviewCycle[] | undefined) 
 
   return reviewCycles.map((cycle) => ({
     ...cycle,
-    schemaVersion: gateReviewCycleSchemaVersion,
+    schemaVersion: cycle.schemaVersion ?? 3,
     status:
       (cycle.status as string) === "submitted"
         ? "awaiting_approval" as const
@@ -1155,28 +1181,4 @@ function normalizeGateStatus(
   }
 
   return gateStatuses.includes(status as GateStatus) ? (status as GateStatus) : "not_submitted";
-}
-
-function normalizeGateCriterion(
-  criterion: Partial<GateCriterion> | undefined,
-  id: string,
-  defaultDescription: string,
-  templateId: string | null,
-  previousDescriptions: readonly string[] = [],
-): GateCriterion {
-  const storedStatus = criterion?.status as string | undefined;
-  const status = storedStatus === "satisfied"
-    ? "completed"
-    : gateCriterionStatuses.includes(storedStatus as GateCriterionStatus)
-      ? (storedStatus as GateCriterionStatus)
-      : "pending";
-
-  return {
-    id,
-    templateId,
-    description: previousDescriptions.includes(criterion?.description?.trim() ?? "")
-      ? defaultDescription
-      : criterion?.description?.trim() || defaultDescription,
-    status,
-  };
 }

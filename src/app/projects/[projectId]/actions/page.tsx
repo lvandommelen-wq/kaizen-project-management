@@ -26,6 +26,10 @@ import {
 } from "@/lib/project-actions";
 import { getProject, type GovernanceTier } from "@/lib/projects";
 import { getCurrentProjectRole } from "@/lib/authorization";
+import {
+  formatCalendarDate as formatDate,
+  formatTimestamp as formatDateTime,
+} from "@/lib/date-format";
 
 export const dynamic = "force-dynamic";
 
@@ -302,7 +306,10 @@ function ActionCard({
   const protectedAction = action.gateDecisionReferences.length > 0;
 
   return (
-    <article className="rounded-xl border border-slate-200 p-5">
+    <article
+      id={`action-${action.id}`}
+      className="scroll-mt-6 rounded-xl border border-slate-200 p-5 target:border-blue-400 target:bg-blue-50/40 target:ring-2 target:ring-blue-100"
+    >
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
@@ -796,15 +803,6 @@ function value(input: string | string[] | undefined) {
 
 function currentDate() {
   return new Date().toISOString().slice(0, 10);
-}
-
-function formatDate(input: string | null) {
-  if (!input) return "Not set";
-  return new Intl.DateTimeFormat("en", { dateStyle: "medium", timeZone: "UTC" }).format(new Date(input.length === 10 ? `${input}T00:00:00Z` : input));
-}
-
-function formatDateTime(input: string) {
-  return new Intl.DateTimeFormat("en", { dateStyle: "medium", timeStyle: "short" }).format(new Date(input));
 }
 
 const inputClass = "h-11 rounded-lg border border-slate-300 bg-white px-3 text-slate-950 shadow-sm";

@@ -232,16 +232,21 @@ async function loadGates(
   const gateIds = gateRows.map((row) => text(row.id));
   if (gateIds.length === 0) return [];
 
-  const criterionResult = await client.query(
-    `SELECT * FROM gate_criterion
-     WHERE gate_id = ANY($1::text[])
-     ORDER BY gate_id, sequence, id`,
-    [gateIds],
-  );
   const approverResult = await client.query(
-    `SELECT * FROM gate_approver
-     WHERE gate_id = ANY($1::text[])
-     ORDER BY gate_id, sequence, id`,
+    `SELECT approver.*,
+            CASE WHEN approver.assigned_user_id IS NOT NULL
+                   AND app_user.status = 'active'
+                   AND identity.user_id IS NOT NULL
+                 THEN true ELSE false END AS identity_verified
+     FROM gate_approver AS approver
+     LEFT JOIN app_user ON app_user.id = approver.assigned_user_id
+     LEFT JOIN user_identity AS identity
+       ON identity.user_id = approver.assigned_user_id
+      AND identity.provider = 'microsoft'
+      AND identity.provider_tenant_id = approver.expected_provider_tenant_id
+      AND identity.provider_object_id = approver.expected_provider_object_id
+     WHERE approver.gate_id = ANY($1::text[])
+     ORDER BY approver.gate_id, approver.sequence, approver.id`,
     [gateIds],
   );
   const cycleResult = await client.query(
@@ -285,7 +290,6 @@ async function loadGates(
       )
     : { rows: [] };
 
-  const criteria = rows(criterionResult);
   const approvers = rows(approverResult);
   const snapshots = rows(snapshotResult);
   const responses = rows(responseResult);
@@ -303,12 +307,18 @@ async function loadGates(
       approvers: approvers
         .filter((row) => row.gate_id === id)
         .map((row) => ({
-          id: text(row.id),
-          name: text(row.name),
-          email: text(row.email),
-          roleFunction: text(row.role_function),
-          approvalRole: text(row.approval_role),
-          approvalLevel: integer(row.approval_level),
+           id: text(row.id),
+           name: text(row.name),
+           email: text(row.email),
+           ...(row.organization_name == null
+             ? {}
+             : { organizationName: text(row.organization_name) }),
+           roleFunction: text(row.role_function),
+           approvalRole: text(row.approval_role),
+           approvalLevel: integer(row.approval_level),
+           ...(row.identity_verified === true
+             ? { identityVerification: "verified" as const }
+             : {}),
           ...(row.expected_provider_tenant_id == null
             ? {}
             : {
@@ -320,14 +330,7 @@ async function loadGates(
       reviewCycles: cycleRows
         .filter((row) => row.gate_id === id)
         .map((row) => mapReviewCycle(row, snapshots, responses, attempts, reworkActions)),
-      criteria: criteria
-        .filter((row) => row.gate_id === id)
-        .map((row) => ({
-          id: text(row.id),
-          templateId: nullableText(row.template_id),
-          description: text(row.description),
-          status: text(row.status) as Gate["criteria"][number]["status"],
-        })),
+      criteria: [],
     };
   });
 }
@@ -374,6 +377,12 @@ function mapReviewCycle(
         roleFunction: text(snapshot.role_function),
         approvalRole: text(snapshot.approval_role),
         approvalLevel: integer(snapshot.approval_level),
+        ...(snapshot.authentication_method == null
+          ? {}
+          : { authenticationMethod: text(snapshot.authentication_method) as "email_otp" }),
+        ...(snapshot.review_access_id == null
+          ? {}
+          : { reviewAccessId: text(snapshot.review_access_id) }),
         ...(snapshot.expected_provider_tenant_id == null
           ? {}
           : {
@@ -438,17 +447,7 @@ export async function loadGateDeliverables(
     [projectId, packageId, gateId],
   );
   const deliverableRows = rows(result);
-  const ids = deliverableRows.map((row) => text(row.id));
-  const linkResult = ids.length > 0
-    ? await client.query(
-        `SELECT * FROM deliverable_criterion
-         WHERE deliverable_id = ANY($1::text[])
-         ORDER BY deliverable_id, sequence, criterion_id`,
-        [ids],
-      )
-    : { rows: [] };
-  const links = rows(linkResult);
-  return deliverableRows.map((row) => mapDeliverable(row, links));
+  return deliverableRows.map((row) => mapDeliverable(row));
 }
 
 export async function loadDeliverable(
@@ -458,16 +457,10 @@ export async function loadDeliverable(
   const result = await client.query("SELECT * FROM deliverable WHERE id = $1", [deliverableId]);
   const row = rows(result)[0];
   if (!row) return null;
-  const linkResult = await client.query(
-    `SELECT * FROM deliverable_criterion
-     WHERE deliverable_id = $1
-     ORDER BY sequence, criterion_id`,
-    [deliverableId],
-  );
-  return mapDeliverable(row, rows(linkResult));
+  return mapDeliverable(row);
 }
 
-function mapDeliverable(row: Row, links: Row[]): Deliverable {
+function mapDeliverable(row: Row): Deliverable {
   const id = text(row.id);
   return {
     id,
@@ -476,12 +469,17 @@ function mapDeliverable(row: Row, links: Row[]): Deliverable {
     projectId: text(row.project_id),
     packageId: nullableText(row.package_id),
     gateId: text(row.gate_id),
-    criterionIds: links
-      .filter((link) => link.deliverable_id === id)
-      .map((link) => text(link.criterion_id)),
+    criterionIds: [],
     title: text(row.title),
     description: text(row.description),
     status: text(row.status) as Deliverable["status"],
+    applicability: text(row.applicability) as Deliverable["applicability"],
+    applicabilityJustification: nullableText(row.applicability_justification),
+    applicabilityDecidedAt: nullableTimestamp(row.applicability_decided_at),
+    applicabilityDecidedByUserId: nullableText(row.applicability_decided_by_user_id),
+    applicabilityDecidedByDisplayName: nullableText(row.applicability_decided_by_display_name),
+    applicabilityOrigin: text(row.applicability_origin) as Deliverable["applicabilityOrigin"],
+    applicabilityLocked: row.applicability_locked === true,
     stageId: text(row.stage_id),
     scopeLevel: text(row.scope_level) as Deliverable["scopeLevel"],
     createdAt: timestamp(row.created_at),
@@ -540,7 +538,9 @@ async function mapActions(client: PoolClient, actionRows: Row[]): Promise<Projec
     [ids],
   );
   const referenceResult = await client.query(
-    `SELECT * FROM action_gate_decision_reference
+    `SELECT reference.*,
+            reference.due_date_at_approval::text AS due_date_at_approval
+     FROM action_gate_decision_reference AS reference
      WHERE action_id = ANY($1::text[])
      ORDER BY action_id, sequence, id`,
     [ids],
@@ -566,12 +566,27 @@ async function mapActions(client: PoolClient, actionRows: Row[]): Promise<Projec
       }));
     const gateDecisionReferences: GateDecisionReference[] = referenceRows
       .filter((candidate) => candidate.action_id === id)
-      .map((reference) => ({
-        id: text(reference.id),
-        gateId: text(reference.gate_id),
-        decision: text(reference.decision) as GateDecisionReference["decision"],
-        recordedAt: timestamp(reference.recorded_at),
-      }));
+      .map((reference) => {
+        const reviewCycleId = nullableText(reference.review_cycle_id);
+        return {
+          id: text(reference.id),
+          gateId: text(reference.gate_id),
+          ...(reviewCycleId ? { reviewCycleId } : {}),
+          decision: text(reference.decision) as GateDecisionReference["decision"],
+          recordedAt: timestamp(reference.recorded_at),
+          ...(reference.action_sequence_at_approval == null
+            ? {}
+            : {
+                approvalSnapshot: {
+                  sequence: integer(reference.action_sequence_at_approval),
+                  description: text(reference.description_at_approval),
+                  assignee: text(reference.assignee_at_approval),
+                  dueDate: nullableDate(reference.due_date_at_approval),
+                  status: text(reference.status_at_approval) as ProjectAction["status"],
+                },
+              }),
+        };
+      });
     return {
       id,
       projectId: text(row.project_id),

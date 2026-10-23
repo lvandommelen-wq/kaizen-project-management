@@ -66,8 +66,8 @@ export async function dispatchProjectGateReviewInvitations(input: {
       result,
       claimToken,
     ),
-    (cycle) => getOperationalDataBackend() === "postgres"
-      ? buildAssignedReviewUrl(cycle.id)
+    (cycle, approver) => getOperationalDataBackend() === "postgres" && approver.reviewAccessId
+      ? buildAssignedReviewUrl(approver.reviewAccessId)
       : buildReviewUrl(
           `/projects/${encodeURIComponent(input.projectId)}/gates/${encodeURIComponent(input.gateId)}`,
           cycle.id,
@@ -103,8 +103,8 @@ export async function dispatchPackageGateReviewInvitations(input: {
       result,
       claimToken,
     ),
-    (cycle) => getOperationalDataBackend() === "postgres"
-      ? buildAssignedReviewUrl(cycle.id)
+    (cycle, approver) => getOperationalDataBackend() === "postgres" && approver.reviewAccessId
+      ? buildAssignedReviewUrl(approver.reviewAccessId)
       : buildReviewUrl(
           `/projects/${encodeURIComponent(input.projectId)}/packages/${encodeURIComponent(input.packageId)}/gates/${encodeURIComponent(input.gateId)}`,
           cycle.id,
@@ -121,7 +121,7 @@ async function dispatchGateReviewInvitations(
     result: GateReviewInvitationAttemptResult,
     claimToken?: string,
   ) => Promise<boolean>,
-  getReviewUrl: (cycle: GateReviewCycle) => string,
+  getReviewUrl: (cycle: GateReviewCycle, approver: GateReviewApproverSnapshot) => string,
 ): Promise<GateReviewInvitationDispatchSummary> {
   const summary: GateReviewInvitationDispatchSummary = {
     sent: 0,
@@ -142,7 +142,7 @@ async function dispatchGateReviewInvitations(
         claimed.reviewCycle,
         claimed.approver,
         claimed.attempt.idempotencyKey,
-        getReviewUrl(claimed.reviewCycle),
+        getReviewUrl(claimed.reviewCycle, claimed.approver),
       );
       result = await sendEmail(message);
     } catch (error) {
@@ -201,8 +201,30 @@ function buildReviewUrl(pathname: string, reviewCycleId: string) {
   return url.toString();
 }
 
-function buildAssignedReviewUrl(reviewCycleId: string) {
-  return buildReviewUrl(`/reviews/${encodeURIComponent(reviewCycleId)}`, reviewCycleId);
+function buildAssignedReviewUrl(reviewAccessId: string) {
+  const baseUrl = process.env.APP_BASE_URL?.trim();
+  if (!baseUrl) {
+    throw new InvitationConfigurationError(
+      "app_base_url_missing",
+      "APP_BASE_URL is not configured for Gate Review links.",
+    );
+  }
+  let base: URL;
+  try {
+    base = new URL(baseUrl);
+  } catch {
+    throw new InvitationConfigurationError(
+      "app_base_url_invalid",
+      "APP_BASE_URL must be a valid absolute URL.",
+    );
+  }
+  if ((base.protocol !== "http:" && base.protocol !== "https:") || base.username || base.password) {
+    throw new InvitationConfigurationError(
+      "app_base_url_invalid",
+      "APP_BASE_URL must be a credential-free HTTP or HTTPS URL.",
+    );
+  }
+  return new URL(`/reviews/access/${encodeURIComponent(reviewAccessId)}`, base).toString();
 }
 
 function invitationPreparationFailure(
@@ -266,9 +288,9 @@ function composeGateReviewInvitation(
       "",
       `Review Gate: ${reviewUrl}`,
       "",
-      "This link opens the frozen Review Cycle. It does not record an approval.",
+      "Use this assignment-specific link to request an email verification code. Frozen evidence remains protected until verification, and opening the link does not record an approval.",
     ].join("\n"),
-    html: `<!doctype html><html><body style="margin:0;background:#f4f5f7;font-family:Arial,sans-serif;color:#172b4d"><div style="max-width:640px;margin:0 auto;padding:32px 20px"><div style="background:#ffffff;border:1px solid #dfe1e6;border-radius:8px;padding:28px"><p style="margin:0 0 24px;color:#0052cc;font-size:14px;font-weight:700;letter-spacing:.04em;text-transform:uppercase">Kaizen Project Management</p><h1 style="margin:0 0 16px;font-size:24px;line-height:1.25">Gate Review requested</h1><p style="margin:0 0 20px">Hello ${escapeHtml(approver.name)},</p><p style="margin:0 0 20px">A Gate Review is ready for your approval.</p><table role="presentation" style="border-collapse:collapse;margin:0 0 24px">${htmlDetails}</table><p style="margin:0 0 24px"><a href="${escapeHtml(reviewUrl)}" style="display:inline-block;background:#0052cc;color:#ffffff;text-decoration:none;font-weight:700;padding:12px 18px;border-radius:4px">Review Gate</a></p><p style="margin:0;color:#52606d;font-size:13px;line-height:1.5">This link opens the frozen Review Cycle. It does not record an approval.</p></div></div></body></html>`,
+    html: `<!doctype html><html><body style="margin:0;background:#f4f5f7;font-family:Arial,sans-serif;color:#172b4d"><div style="max-width:640px;margin:0 auto;padding:32px 20px"><div style="background:#ffffff;border:1px solid #dfe1e6;border-radius:8px;padding:28px"><p style="margin:0 0 24px;color:#0052cc;font-size:14px;font-weight:700;letter-spacing:.04em;text-transform:uppercase">Kaizen Project Management</p><h1 style="margin:0 0 16px;font-size:24px;line-height:1.25">Gate Review requested</h1><p style="margin:0 0 20px">Hello ${escapeHtml(approver.name)},</p><p style="margin:0 0 20px">A Gate Review is ready for your approval.</p><table role="presentation" style="border-collapse:collapse;margin:0 0 24px">${htmlDetails}</table><p style="margin:0 0 24px"><a href="${escapeHtml(reviewUrl)}" style="display:inline-block;background:#0052cc;color:#ffffff;text-decoration:none;font-weight:700;padding:12px 18px;border-radius:4px">Review Gate</a></p><p style="margin:0;color:#52606d;font-size:13px;line-height:1.5">Use this assignment-specific link to request an email verification code. Frozen evidence remains protected until verification, and opening the link does not record an approval.</p></div></div></body></html>`,
   };
 }
 

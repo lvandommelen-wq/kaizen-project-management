@@ -95,7 +95,7 @@ try {
       {
         name: "runtime-projection-allowlist",
         status: "pass",
-        details: `${source.projection.summary.addedCriteria} Criteria, ${source.projection.summary.templateVersionUpdates} template versions and ${source.projection.summary.legacyNameUpdates} legacy names matched the approved projection.`,
+        details: `${source.projection.summary.templateVersionUpdates} template versions and ${source.projection.summary.legacyNameUpdates} legacy names matched the approved Deliverables-only projection. ${source.projection.summary.retainedLegacyCriteria} missing legacy Criteria were restored only to preserve existing historical links.`,
       },
     ],
     logicalFingerprint: expectedFingerprint,
